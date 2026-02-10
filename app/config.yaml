@@ -1,0 +1,71 @@
+# OmniBOR Analysis Configuration
+# Defines target repositories, build commands, and output paths
+
+repos:
+  curl:
+    url: https://github.com/curl/curl.git
+    branch: master
+    build_steps:
+      - autoreconf -fi
+      - ./configure --with-openssl --with-zlib --with-nghttp2 --with-libssh2 --with-brotli
+      - make -j$(nproc)
+    clean_cmd: make clean
+    description: "HTTP transfer library and CLI tool (~170K LoC)"
+    output_binaries:
+      - src/.libs/curl
+      - lib/.libs/libcurl.so
+
+  ffmpeg:
+    url: https://github.com/FFmpeg/FFmpeg.git
+    branch: master
+    build_steps:
+      - >-
+        ./configure
+        --enable-gpl
+        --enable-nonfree
+        --enable-libx264
+        --enable-libx265
+        --enable-libvpx
+        --enable-libopus
+        --enable-libmp3lame
+        --enable-libfdk-aac
+        --enable-libfreetype
+        --enable-libfontconfig
+        --enable-libfribidi
+        --enable-libass
+        --enable-openssl
+      - make -j$(nproc)
+    clean_cmd: make clean
+    description: "Multimedia framework (~1.2M LoC, 20+ third-party libs)"
+    output_binaries:
+      - ffmpeg
+      - ffprobe
+      - libavcodec/libavcodec.so
+      - libavformat/libavformat.so
+      - libavutil/libavutil.so
+      - libswscale/libswscale.so
+
+# Paths (relative to /workspace inside container)
+paths:
+  repos_dir: /workspace/repos
+  output_dir: /workspace/output
+  docs_dir: /workspace/docs
+  bomsh_dir: /opt/bomsh
+
+# OmniBOR settings
+omnibor:
+  tracer: bomtrace3
+  create_bom_script: bomsh_create_bom.py
+  sbom_script: bomsh_sbom.py
+  raw_logfile: /tmp/bomsh_hook_raw_logfile.sha1
+
+# Doc naming
+docs:
+  timestamp_format: "%Y-%m-%d_%H%M"
+  types:
+    - build
+    - omnibor
+    - spdx
+    - binary-scan
+    - comparison
+    - runtime

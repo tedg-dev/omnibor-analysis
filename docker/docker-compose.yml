@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  omnibor-env:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnibor-analysis
+    volumes:
+      # Mount repos directory for cloned source code
+      - ../repos:/workspace/repos
+      # Mount output directory for generated artifacts
+      - ../output:/workspace/output
+      # Mount app scripts for orchestration
+      - ../app:/workspace/app
+      # Mount docs for report generation
+      - ../docs:/workspace/docs
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    # Bomtrace requires ptrace capability
+    cap_add:
+      - SYS_PTRACE
+    security_opt:
+      - seccomp:unconfined
