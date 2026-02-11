@@ -57,7 +57,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `DataLoader` — main facade composing the above
   - Module-level convenience functions preserved for backward compatibility
 
-- Rewrote all tests to use class-based API (142 tests, 98% coverage)
+- Refactored `app/analyze.py` from procedural to class-based architecture:
+
+  - `CommandRunner` — wraps subprocess execution with logging
+  - `RepoCloner` — handles git clone logic
+  - `BomtraceBuilder` — instrumented build with bomtrace3 and ADG generation
+  - `SpdxGenerator` — generates SPDX SBOM from OmniBOR data
+  - `SyftGenerator` — generates baseline manifest SBOM via Syft
+  - `DocWriter` — writes build logs and runtime metrics
+  - `AnalysisPipeline` — facade orchestrating the full workflow (Facade pattern)
+
+- Refactored `app/compare.py` from procedural to class-based architecture:
+
+  - `SpdxLoader` — loads and parses SPDX JSON files
+  - `PackageExtractor` — extracts and normalizes package data
+  - `SbomComparator` — compares two SPDX package sets
+  - `ReportGenerator` — generates markdown comparison reports
+  - `ComparisonPipeline` — facade orchestrating the full workflow (Facade pattern)
+
+- Rewrote all tests to use class-based API (207 tests, 99% coverage)
 
 ## [0.1.0] - 2026-02-10
 
