@@ -4,66 +4,68 @@ description: Add a new target repository for OmniBOR analysis
 
 # Add a New Target Repository
 
-Steps to add a new C/C++ repository for build interception analysis.
+Use `app/add_repo.py` to auto-discover repo metadata from GitHub and generate
+the `config.yaml` entry. Requires `gh` CLI authenticated on the host.
 
-## 1. Add the repo to config.yaml
+## 1. Preview the generated config (dry-run, default)
 
-Edit `app/config.yaml` and add a new entry under `repos:`:
+The user provides just a repo name. Cascade runs:
 
-```yaml
-repos:
-  newrepo:
-    url: https://github.com/org/newrepo.git
-    branch: main
-    build_steps:
-      - autoreconf -fi          # or cmake .. or ./configure
-      - ./configure --with-xxx
-      - make -j$(nproc)
-    clean_cmd: make clean
-    description: "Short description of the project"
-    output_binaries:
-      - path/to/binary
-      - path/to/libfoo.so
+```bash
+source .venv/bin/activate && python3 app/add_repo.py <NAME>
 ```
 
-**Important:** The last entry in `build_steps` must be the `make` command — this is the
-step that gets wrapped with `bomtrace3`.
+Accepts: repo name (`curl`), owner/repo (`curl/curl`), or full GitHub URL.
 
-## 2. Add build dependencies to the Dockerfile
+The script will:
+- Search GitHub for the canonical repository
+- Detect the build system (autoconf, cmake, meson, make)
+- Analyze configure.ac / CMakeLists.txt for dependency flags
+- Identify output binaries from Makefile.am
+- Cross-check required apt packages against the Dockerfile
+- Display the generated config.yaml entry
 
-Edit `docker/Dockerfile` and add any required `-dev` packages:
+## 2. Review the output with the user
 
-```dockerfile
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libfoo-dev \
-    libbar-dev
+Show the user the generated entry and ask them to confirm or adjust:
+- Build steps (configure flags, build system)
+- Output binaries
+- Any missing Dockerfile packages
+
+## 3. Write the config and create directories
+
+Once the user approves:
+
+```bash
+source .venv/bin/activate && python3 app/add_repo.py <NAME> --write
 ```
 
-## 3. Rebuild the Docker image
+This writes the entry to `app/config.yaml` and creates output directories.
+
+## 4. Add missing Dockerfile packages (if any)
+
+If the script reports missing apt packages, add them to `docker/Dockerfile`
+in the main `apt-get install` block, then rebuild:
 
 ```bash
 docker-compose -f docker/docker-compose.yml build
 ```
 
-## 4. Create output directories
-
-```bash
-mkdir -p output/omnibor/newrepo output/spdx/newrepo output/binary-scan/newrepo docs/newrepo
-```
-
 ## 5. Run analysis
 
 ```bash
-docker-compose -f docker/docker-compose.yml run --rm omnibor-env python3 /workspace/app/analyze.py --repo newrepo
+docker-compose -f docker/docker-compose.yml run --rm omnibor-env \
+  python3 /workspace/app/analyze.py --repo <NAME>
 ```
+
+## Manual override
+
+If the auto-detection is wrong, edit `app/config.yaml` directly. The key rules:
+- Last `build_steps` entry must be the `make` command (gets wrapped with bomtrace3)
+- `output_binaries` should list the main executables and shared libs
 
 ## Tips
 
 - Test the build manually inside the container first before running analyze.py
 - Use `docker-compose run --rm omnibor-env bash` to enter the container and experiment
-- If the project uses cmake instead of autoconf, the build_steps would be:
-  ```yaml
-  build_steps:
-    - mkdir -p build && cd build && cmake ..
-    - make -C build -j$(nproc)
-  ```
+- The script prefers C/C++ repos and exact name matches when searching GitHub
