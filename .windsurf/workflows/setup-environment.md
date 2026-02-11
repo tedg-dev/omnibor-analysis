@@ -6,6 +6,22 @@ description: Run on every startup to verify the omnibor-analysis environment is 
 
 Run this workflow when opening the omnibor-analysis workspace.
 
+## 0. MANDATORY: Review all project rules
+
+**This step is non-negotiable. Do it before ANY other work.**
+
+Read every file in `.windsurf/rules/` to refresh all project rules:
+
+```bash
+for f in .windsurf/rules/*.md; do echo "=== $f ==="; cat "$f"; echo; done
+```
+
+After reading, confirm to the user which rules you've loaded and acknowledge
+the key constraints (pre-commit gates, single-step git, CHANGELOG updates,
+PR-first workflow, no direct commits to main).
+
+**Do not proceed to any task until this step is complete.**
+
 ## 1. Verify Docker is running
 
 ```bash

@@ -1,0 +1,36 @@
+{
+  "_meta": {
+    "description": "Build system detection rules: maps filename presence to build system type",
+    "source": "Derived from GitHub Linguist (github-linguist/linguist) and GNU Build System conventions",
+    "source_urls": [
+      "https://github.com/github-linguist/linguist/blob/main/lib/linguist/languages.yml",
+      "https://www.gnu.org/software/automake/manual/html_node/Autotools-Introduction.html",
+      "https://cmake.org/cmake/help/latest/",
+      "https://mesonbuild.com/",
+      "https://www.gnu.org/software/make/"
+    ],
+    "last_updated": null,
+    "cache_max_age_days": 30
+  },
+  "indicators": [
+    {"file": "configure.ac", "system": "autoconf"},
+    {"file": "configure.in", "system": "autoconf"},
+    {"file": "CMakeLists.txt", "system": "cmake"},
+    {"file": "meson.build", "system": "meson"},
+    {"file": "Configure", "system": "perl-configure"},
+    {"file": "config", "system": "perl-configure"},
+    {"file": "auto/configure", "system": "auto-configure"},
+    {"file": "configure", "system": "configure-only"},
+    {"file": "Makefile", "system": "make-only"},
+    {"file": "GNUmakefile", "system": "make-only"},
+    {"file": "makefile", "system": "make-only"},
+    {"file": "BUILD.gn", "system": "gn"},
+    {"file": "BUILD.bazel", "system": "bazel"},
+    {"file": "WORKSPACE", "system": "bazel"},
+    {"file": "SConstruct", "system": "scons"},
+    {"file": "wscript", "system": "waf"},
+    {"file": "premake5.lua", "system": "premake"},
+    {"file": "Jamfile", "system": "boost-build"},
+    {"file": "build.ninja", "system": "ninja"}
+  ]
+}

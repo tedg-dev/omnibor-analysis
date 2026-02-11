@@ -1,0 +1,190 @@
+{
+  "_meta": {
+    "description": "C/C++ library dependency metadata: configure flags, CMake flags, and Debian apt package names",
+    "sources": [
+      "Repology API (https://repology.org/api) — cross-distro package name mapping",
+      "Debian Sources API (https://sources.debian.org/doc/api/) — package metadata",
+      "pkg-config .pc files — canonical library names"
+    ],
+    "repology_filter": "debian_unstable",
+    "last_updated": null,
+    "cache_max_age_days": 7
+  },
+  "libraries": {
+    "openssl": {
+      "pkg_config": "openssl",
+      "configure_flag": "--with-openssl",
+      "cmake_flag": "-DCMAKE_USE_OPENSSL=ON",
+      "apt_packages": ["libssl-dev"],
+      "repology_project": "openssl"
+    },
+    "zlib": {
+      "pkg_config": "zlib",
+      "configure_flag": "--with-zlib",
+      "cmake_flag": "-DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so",
+      "apt_packages": ["zlib1g-dev"],
+      "repology_project": "zlib"
+    },
+    "nghttp2": {
+      "pkg_config": "libnghttp2",
+      "configure_flag": "--with-nghttp2",
+      "cmake_flag": "-DUSE_NGHTTP2=ON",
+      "apt_packages": ["libnghttp2-dev"],
+      "repology_project": "nghttp2"
+    },
+    "libssh2": {
+      "pkg_config": "libssh2",
+      "configure_flag": "--with-libssh2",
+      "cmake_flag": "-DCMAKE_USE_LIBSSH2=ON",
+      "apt_packages": ["libssh2-1-dev"],
+      "repology_project": "libssh2"
+    },
+    "brotli": {
+      "pkg_config": "libbrotlidec",
+      "configure_flag": "--with-brotli",
+      "cmake_flag": "-DCURL_BROTLI=ON",
+      "apt_packages": ["libbrotli-dev"],
+      "repology_project": "brotli"
+    },
+    "pcre": {
+      "pkg_config": "libpcre",
+      "configure_flag": "--with-pcre",
+      "cmake_flag": "",
+      "apt_packages": ["libpcre3-dev"],
+      "repology_project": "pcre"
+    },
+    "pcre2": {
+      "pkg_config": "libpcre2-8",
+      "configure_flag": "--with-pcre2",
+      "cmake_flag": "",
+      "apt_packages": ["libpcre2-dev"],
+      "repology_project": "pcre2"
+    },
+    "expat": {
+      "pkg_config": "expat",
+      "configure_flag": "--with-expat",
+      "cmake_flag": "",
+      "apt_packages": ["libexpat1-dev"],
+      "repology_project": "expat"
+    },
+    "libxml2": {
+      "pkg_config": "libxml-2.0",
+      "configure_flag": "--with-libxml2",
+      "cmake_flag": "",
+      "apt_packages": ["libxml2-dev"],
+      "repology_project": "libxml2"
+    },
+    "gnutls": {
+      "pkg_config": "gnutls",
+      "configure_flag": "--with-gnutls",
+      "cmake_flag": "",
+      "apt_packages": ["libgnutls28-dev"],
+      "repology_project": "gnutls"
+    },
+    "libevent": {
+      "pkg_config": "libevent",
+      "configure_flag": "",
+      "cmake_flag": "",
+      "apt_packages": ["libevent-dev"],
+      "repology_project": "libevent"
+    },
+    "libffi": {
+      "pkg_config": "libffi",
+      "configure_flag": "",
+      "cmake_flag": "",
+      "apt_packages": ["libffi-dev"],
+      "repology_project": "libffi"
+    },
+    "readline": {
+      "pkg_config": "readline",
+      "configure_flag": "--with-readline",
+      "cmake_flag": "",
+      "apt_packages": ["libreadline-dev"],
+      "repology_project": "readline"
+    },
+    "ncurses": {
+      "pkg_config": "ncurses",
+      "configure_flag": "--with-ncurses",
+      "cmake_flag": "",
+      "apt_packages": ["libncurses-dev"],
+      "repology_project": "ncurses"
+    },
+    "x264": {
+      "pkg_config": "x264",
+      "configure_flag": "--enable-libx264",
+      "cmake_flag": "",
+      "apt_packages": ["libx264-dev"],
+      "repology_project": "x264"
+    },
+    "x265": {
+      "pkg_config": "x265",
+      "configure_flag": "--enable-libx265",
+      "cmake_flag": "",
+      "apt_packages": ["libx265-dev"],
+      "repology_project": "x265"
+    },
+    "vpx": {
+      "pkg_config": "vpx",
+      "configure_flag": "--enable-libvpx",
+      "cmake_flag": "",
+      "apt_packages": ["libvpx-dev"],
+      "repology_project": "libvpx"
+    },
+    "opus": {
+      "pkg_config": "opus",
+      "configure_flag": "--enable-libopus",
+      "cmake_flag": "",
+      "apt_packages": ["libopus-dev"],
+      "repology_project": "opus"
+    },
+    "lame": {
+      "pkg_config": "",
+      "configure_flag": "--enable-libmp3lame",
+      "cmake_flag": "",
+      "apt_packages": ["libmp3lame-dev"],
+      "repology_project": "lame"
+    },
+    "fdk-aac": {
+      "pkg_config": "fdk-aac",
+      "configure_flag": "--enable-libfdk-aac",
+      "cmake_flag": "",
+      "apt_packages": ["libfdk-aac-dev"],
+      "repology_project": "fdk-aac"
+    },
+    "freetype": {
+      "pkg_config": "freetype2",
+      "configure_flag": "--enable-libfreetype",
+      "cmake_flag": "",
+      "apt_packages": ["libfreetype6-dev"],
+      "repology_project": "freetype"
+    },
+    "fontconfig": {
+      "pkg_config": "fontconfig",
+      "configure_flag": "--enable-libfontconfig",
+      "cmake_flag": "",
+      "apt_packages": ["libfontconfig1-dev"],
+      "repology_project": "fontconfig"
+    },
+    "fribidi": {
+      "pkg_config": "fribidi",
+      "configure_flag": "--enable-libfribidi",
+      "cmake_flag": "",
+      "apt_packages": ["libfribidi-dev"],
+      "repology_project": "fribidi"
+    },
+    "libass": {
+      "pkg_config": "libass",
+      "configure_flag": "--enable-libass",
+      "cmake_flag": "",
+      "apt_packages": ["libass-dev"],
+      "repology_project": "libass"
+    },
+    "curl": {
+      "pkg_config": "libcurl",
+      "configure_flag": "",
+      "cmake_flag": "",
+      "apt_packages": ["libcurl4-openssl-dev"],
+      "repology_project": "curl"
+    }
+  }
+}

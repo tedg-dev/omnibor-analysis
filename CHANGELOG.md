@@ -17,11 +17,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `app/add_repo.py` — smart repo discovery script that auto-generates `config.yaml` entries from just a repo name using GitHub API (`gh` CLI)
+  - Detects build systems: autoconf, cmake, meson, perl-configure (OpenSSL), auto-configure (nginx), configure-only (FFmpeg), make-only
+  - Analyzes `configure.ac` / `CMakeLists.txt` / `configure` for dependency flags
+  - Cross-checks required apt packages against the Dockerfile
+  - Supports dry-run (default) and `--write` mode
+- `app/data_loader.py` — external data loader with fetch/cache/fallback pattern
+  - Build system indicators loaded from `app/data/build_systems.json` (sourced from GitHub Linguist)
+  - Dependency metadata loaded from `app/data/dependencies.json` (sourced from Repology API)
+  - On-demand Repology lookups for unknown dependencies with automatic cache persistence
+  - Respects Repology rate limits (1 req/sec) and never fails on network errors
+- `docs/summary/workflow-guide.md` — consolidated user guide for all workflows
+- Mandatory rules-review step (Step 0) in `/setup-environment` workflow
 - Comprehensive Docker build documentation in `docker/README.md` (troubleshooting table, architecture notes, version pin rationale)
 - Detailed inline build notes in `docker/Dockerfile`
 - `.windsurf/rules/build-documentation.md` — rule to update docs after build changes
 - `.windsurf/rules/pre-commit.md` — pre-commit quality gates (tests, coverage, single-step git)
 - `.windsurf/workflows/merge-pr.md` — streamlined PR merge workflow
+
+### Changed
+
+- `/add-repo` workflow now uses `app/add_repo.py` for automated config generation instead of manual editing
+- `BUILD_SYSTEM_INDICATORS` and `KNOWN_DEPENDENCIES` replaced with external JSON data files loaded via `data_loader.py` (no more hardcoded static lists)
 
 ## [0.1.0] - 2026-02-10
 

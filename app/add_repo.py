@@ -27,152 +27,17 @@ import sys
 import yaml
 from pathlib import Path
 
+from data_loader import (
+    load_build_systems,
+    load_dependencies,
+)
 
-# ============================================================
-# Build system detection rules
-# ============================================================
-# Maps file presence to build system type. Checked in priority order.
-BUILD_SYSTEM_INDICATORS = [
-    ("configure.ac", "autoconf"),
-    ("configure.in", "autoconf"),
-    ("CMakeLists.txt", "cmake"),
-    ("meson.build", "meson"),
-    ("Configure", "perl-configure"),
-    ("config", "perl-configure"),
-    ("auto/configure", "auto-configure"),
-    ("configure", "configure-only"),
-    ("Makefile", "make-only"),
-]
-
-# Common configure flag patterns detected from configure.ac / CMakeLists.txt
-# Maps dependency names to their typical --with/--enable flags and apt packages
-KNOWN_DEPENDENCIES = {
-    "openssl": {
-        "configure_flag": "--with-openssl",
-        "cmake_flag": "-DCMAKE_USE_OPENSSL=ON",
-        "apt_packages": ["libssl-dev"],
-    },
-    "zlib": {
-        "configure_flag": "--with-zlib",
-        "cmake_flag": "-DZLIB_LIBRARY=/usr/lib/x86_64-linux-gnu/libz.so",
-        "apt_packages": ["zlib1g-dev"],
-    },
-    "nghttp2": {
-        "configure_flag": "--with-nghttp2",
-        "cmake_flag": "-DUSE_NGHTTP2=ON",
-        "apt_packages": ["libnghttp2-dev"],
-    },
-    "libssh2": {
-        "configure_flag": "--with-libssh2",
-        "cmake_flag": "-DCMAKE_USE_LIBSSH2=ON",
-        "apt_packages": ["libssh2-1-dev"],
-    },
-    "brotli": {
-        "configure_flag": "--with-brotli",
-        "cmake_flag": "-DCURL_BROTLI=ON",
-        "apt_packages": ["libbrotli-dev"],
-    },
-    "pcre": {
-        "configure_flag": "--with-pcre",
-        "cmake_flag": "",
-        "apt_packages": ["libpcre3-dev"],
-    },
-    "pcre2": {
-        "configure_flag": "--with-pcre2",
-        "cmake_flag": "",
-        "apt_packages": ["libpcre2-dev"],
-    },
-    "expat": {
-        "configure_flag": "--with-expat",
-        "cmake_flag": "",
-        "apt_packages": ["libexpat1-dev"],
-    },
-    "libxml2": {
-        "configure_flag": "--with-libxml2",
-        "cmake_flag": "",
-        "apt_packages": ["libxml2-dev"],
-    },
-    "gnutls": {
-        "configure_flag": "--with-gnutls",
-        "cmake_flag": "",
-        "apt_packages": ["libgnutls28-dev"],
-    },
-    "libevent": {
-        "configure_flag": "",
-        "cmake_flag": "",
-        "apt_packages": ["libevent-dev"],
-    },
-    "libffi": {
-        "configure_flag": "",
-        "cmake_flag": "",
-        "apt_packages": ["libffi-dev"],
-    },
-    "readline": {
-        "configure_flag": "--with-readline",
-        "cmake_flag": "",
-        "apt_packages": ["libreadline-dev"],
-    },
-    "ncurses": {
-        "configure_flag": "--with-ncurses",
-        "cmake_flag": "",
-        "apt_packages": ["libncurses-dev"],
-    },
-    "x264": {
-        "configure_flag": "--enable-libx264",
-        "cmake_flag": "",
-        "apt_packages": ["libx264-dev"],
-    },
-    "x265": {
-        "configure_flag": "--enable-libx265",
-        "cmake_flag": "",
-        "apt_packages": ["libx265-dev"],
-    },
-    "vpx": {
-        "configure_flag": "--enable-libvpx",
-        "cmake_flag": "",
-        "apt_packages": ["libvpx-dev"],
-    },
-    "opus": {
-        "configure_flag": "--enable-libopus",
-        "cmake_flag": "",
-        "apt_packages": ["libopus-dev"],
-    },
-    "lame": {
-        "configure_flag": "--enable-libmp3lame",
-        "cmake_flag": "",
-        "apt_packages": ["libmp3lame-dev"],
-    },
-    "fdk-aac": {
-        "configure_flag": "--enable-libfdk-aac",
-        "cmake_flag": "",
-        "apt_packages": ["libfdk-aac-dev"],
-    },
-    "freetype": {
-        "configure_flag": "--enable-libfreetype",
-        "cmake_flag": "",
-        "apt_packages": ["libfreetype6-dev"],
-    },
-    "fontconfig": {
-        "configure_flag": "--enable-libfontconfig",
-        "cmake_flag": "",
-        "apt_packages": ["libfontconfig1-dev"],
-    },
-    "fribidi": {
-        "configure_flag": "--enable-libfribidi",
-        "cmake_flag": "",
-        "apt_packages": ["libfribidi-dev"],
-    },
-    "libass": {
-        "configure_flag": "--enable-libass",
-        "cmake_flag": "",
-        "apt_packages": ["libass-dev"],
-    },
-    "curl": {
-        "configure_flag": "",
-        "cmake_flag": "",
-        "apt_packages": ["libcurl4-openssl-dev"],
-    },
-}
+# Build system indicators and dependency metadata are loaded
+# from external JSON data files via data_loader.py.
+# Sources: GitHub Linguist, Repology API, Debian Sources API.
+# See app/data/build_systems.json and app/data/dependencies.json.
+BUILD_SYSTEM_INDICATORS = load_build_systems()
+KNOWN_DEPENDENCIES = load_dependencies()
 
 
 def gh_api(endpoint):
