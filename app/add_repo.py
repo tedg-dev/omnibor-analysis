@@ -3,6 +3,7 @@
 OmniBOR Analysis — Smart repo discovery and config generation.
 
 Given just a repo name (e.g., "curl", "openssl", "zlib"), this script:
+
 1. Searches GitHub for the canonical repository
 2. Inspects the repo contents to detect the build system
 3. Identifies configure flags, dependencies, and output binaries
@@ -12,10 +13,21 @@ Given just a repo name (e.g., "curl", "openssl", "zlib"), this script:
 Requires: gh CLI authenticated (https://cli.github.com/)
 
 Usage:
+
     python3 add_repo.py curl
     python3 add_repo.py openssl --write
     python3 add_repo.py https://github.com/curl/curl --write
     python3 add_repo.py curl --dry-run
+
+Classes:
+
+    - GitHubClient: encapsulates all gh CLI / GitHub API calls
+    - BuildSystemDetector: detects build system from file list
+    - DependencyAnalyzer: inspects config files for dependency flags
+    - BinaryDetector: detects output binaries from Makefiles
+    - BuildStepGenerator: generates build commands per build system
+    - ConfigGenerator: generates and writes config.yaml entries
+    - RepoDiscovery: facade orchestrating the full pipeline
 """
 
 import argparse
@@ -27,507 +39,699 @@ import sys
 import yaml
 from pathlib import Path
 
-from data_loader import (
-    load_build_systems,
-    load_dependencies,
-)
-
-# Build system indicators and dependency metadata are loaded
-# from external JSON data files via data_loader.py.
-# Sources: GitHub Linguist, Repology API, Debian Sources API.
-# See app/data/build_systems.json and app/data/dependencies.json.
-BUILD_SYSTEM_INDICATORS = load_build_systems()
-KNOWN_DEPENDENCIES = load_dependencies()
+from data_loader import DataLoader
 
 
-def gh_api(endpoint):
-    """Call the GitHub API via gh CLI. Returns parsed JSON."""
-    result = subprocess.run(
-        ["gh", "api", endpoint, "--paginate"],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        return None
-    try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
+# ============================================================
+# GitHub API client
+# ============================================================
 
+class GitHubClient:
+    """Encapsulates all GitHub API interactions via gh CLI."""
 
-def gh_search_repo(query):
-    """Search GitHub for a repo by name. Returns top result."""
-    fields = (
-        "fullName,description,url,"
-        "stargazersCount,defaultBranch,language"
-    )
-    result = subprocess.run(
-        ["gh", "search", "repos", query,
-         "--limit", "5", "--json", fields],
-        capture_output=True, text=True
-    )
-    if result.returncode != 0:
-        print(f"[ERROR] gh search failed: {result.stderr.strip()}")
-        return None
-    try:
-        repos = json.loads(result.stdout)
-    except json.JSONDecodeError:
-        return None
+    def api(self, endpoint):
+        """Call the GitHub API via gh CLI. Returns parsed JSON."""
+        result = subprocess.run(
+            ["gh", "api", endpoint, "--paginate"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            return None
+        try:
+            return json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
 
-    if not repos:
-        print(f"[ERROR] No repositories found for '{query}'")
-        return None
+    def search_repos(self, query):
+        """Search GitHub for repos by name. Returns top result."""
+        fields = (
+            "fullName,description,url,"
+            "stargazersCount,defaultBranch,language"
+        )
+        result = subprocess.run(
+            [
+                "gh", "search", "repos", query,
+                "--limit", "5", "--json", fields,
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(
+                "[ERROR] gh search failed: "
+                f"{result.stderr.strip()}"
+            )
+            return None
+        try:
+            repos = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return None
 
-    # Filter for C/C++ repos, prefer exact name matches and highest stars
-    c_langs = ("c", "c++", "")
-    c_repos = [
-        r for r in repos
-        if r.get("language", "").lower() in c_langs
-    ]
-    candidates = c_repos if c_repos else repos
+        if not repos:
+            print(
+                "[ERROR] No repositories found "
+                f"for '{query}'"
+            )
+            return None
 
-    # Prefer exact name match
-    for r in candidates:
-        name = r["fullName"].split("/")[-1].lower()
-        if name == query.lower():
-            return r
+        c_langs = ("c", "c++", "")
+        c_repos = [
+            r for r in repos
+            if r.get(
+                "language", ""
+            ).lower() in c_langs
+        ]
+        candidates = c_repos if c_repos else repos
 
-    # Fall back to highest stars
-    return sorted(
-        candidates,
-        key=lambda r: r.get("stargazersCount", 0),
-        reverse=True
-    )[0]
+        for r in candidates:
+            name = (
+                r["fullName"].split("/")[-1].lower()
+            )
+            if name == query.lower():
+                return r
 
+        return sorted(
+            candidates,
+            key=lambda r: r.get(
+                "stargazersCount", 0
+            ),
+            reverse=True,
+        )[0]
 
-def parse_github_url(url_or_name):
-    """Parse a GitHub URL into owner/repo, or return None if it's just a name."""
-    patterns = [
-        r"github\.com[:/]([^/]+)/([^/.]+)",  # https or ssh
-    ]
-    for pat in patterns:
-        match = re.search(pat, url_or_name)
+    def get_repo_info(self, name_or_url):
+        """Get repository info. Accepts name, owner/repo, or URL."""
+        full_name = self.parse_github_url(
+            name_or_url
+        )
+
+        if full_name:
+            data = self.api(f"repos/{full_name}")
+            if data:
+                return self._normalize(data)
+        elif "/" in name_or_url:
+            data = self.api(f"repos/{name_or_url}")
+            if data:
+                return self._normalize(data)
+
+        return self.search_repos(name_or_url)
+
+    def get_file_tree(self, full_name, branch):
+        """Get the file tree (top-level + src/ + lib/ + auto/)."""
+        contents = self.api(
+            f"repos/{full_name}"
+            f"/contents?ref={branch}"
+        )
+        if not contents:
+            return []
+
+        files = [item["name"] for item in contents]
+
+        for subdir in ("src", "lib", "auto"):
+            url = (
+                f"repos/{full_name}"
+                f"/contents/{subdir}"
+                f"?ref={branch}"
+            )
+            sub = self.api(url)
+            if sub and isinstance(sub, list):
+                for item in sub:
+                    files.append(
+                        f"{subdir}/{item['name']}"
+                    )
+
+        return files
+
+    def get_file_content(
+        self, full_name, path, branch
+    ):
+        """Fetch a file's content (base64-decoded)."""
+        url = (
+            f"repos/{full_name}/contents/{path}"
+            f"?ref={branch}"
+        )
+        data = self.api(url)
+        if not data or "content" not in data:
+            return None
+        try:
+            return base64.b64decode(
+                data["content"]
+            ).decode("utf-8", errors="replace")
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def get_languages(self, full_name):
+        """Get language byte counts from GitHub API."""
+        return self.api(
+            f"repos/{full_name}/languages"
+        )
+
+    @staticmethod
+    def parse_github_url(url_or_name):
+        """Parse a GitHub URL into owner/repo, or return None."""
+        match = re.search(
+            r"github\.com[:/]([^/]+)/([^/.]+)",
+            url_or_name,
+        )
         if match:
             return (
                 f"{match.group(1)}/{match.group(2)}"
             )
-    return None
+        return None
+
+    @staticmethod
+    def _normalize(data):
+        """Convert GitHub API repo response to info dict."""
+        return {
+            "fullName": data["full_name"],
+            "description": data.get(
+                "description", ""
+            ),
+            "url": data["html_url"],
+            "stargazersCount": data.get(
+                "stargazers_count", 0
+            ),
+            "defaultBranch": data.get(
+                "default_branch", "main"
+            ),
+            "language": data.get("language", ""),
+        }
 
 
-def _repo_info_from_api(data):
-    """Convert GitHub API repo response to info dict."""
-    return {
-        "fullName": data["full_name"],
-        "description": data.get("description", ""),
-        "url": data["html_url"],
-        "stargazersCount": data.get(
-            "stargazers_count", 0
+# ============================================================
+# Build system detection
+# ============================================================
+
+class BuildSystemDetector:
+    """Detects the build system from a repository's file list."""
+
+    def __init__(self, indicators=None):
+        self.indicators = indicators or []
+
+    def detect(self, files):
+        """Return the build system name for the given file list."""
+        for indicator, system in self.indicators:
+            if indicator in files:
+                return system
+        return "unknown"
+
+
+# ============================================================
+# Dependency analysis
+# ============================================================
+
+class DependencyAnalyzer:
+    """Inspects build config files to detect optional dependencies."""
+
+    _CONFIG_FILES = {
+        "autoconf": (
+            "configure.ac", "configure_flag"
         ),
-        "defaultBranch": data.get(
-            "default_branch", "main"
+        "cmake": (
+            "CMakeLists.txt", "cmake_flag"
         ),
-        "language": data.get("language", ""),
+        "configure-only": (
+            "configure", "configure_flag"
+        ),
     }
 
+    def __init__(self, known_deps=None, github=None):
+        self.known_deps = known_deps or {}
+        self.github = github or GitHubClient()
 
-def get_repo_info(name_or_url):
-    """Get repository info from GitHub. Accepts name, owner/repo, or full URL."""
-    full_name = parse_github_url(name_or_url)
+    def analyze(
+        self, full_name, branch,
+        build_system, files,
+    ):
+        """Detect configure flags and apt packages.
 
-    if full_name:
-        # Direct lookup
-        data = gh_api(f"repos/{full_name}")
-        if data:
-            return _repo_info_from_api(data)
-    elif "/" in name_or_url:
-        # owner/repo format
-        data = gh_api(f"repos/{name_or_url}")
-        if data:
-            return _repo_info_from_api(data)
-
-    # Search by name
-    return gh_search_repo(name_or_url)
-
-
-def get_repo_tree(full_name, branch):
-    """Get the file tree of a repo (top-level + src/)."""
-    # Top-level contents
-    contents = gh_api(f"repos/{full_name}/contents?ref={branch}")
-    if not contents:
-        return []
-
-    files = []
-    for item in contents:
-        files.append(item["name"])
-
-    # Also check src/ if it exists
-    src_url = (
-        f"repos/{full_name}/contents/src"
-        f"?ref={branch}"
-    )
-    src_contents = gh_api(src_url)
-    if src_contents and isinstance(src_contents, list):
-        for item in src_contents:
-            files.append(f"src/{item['name']}")
-
-    lib_url = (
-        f"repos/{full_name}/contents/lib"
-        f"?ref={branch}"
-    )
-    lib_contents = gh_api(lib_url)
-    if lib_contents and isinstance(lib_contents, list):
-        for item in lib_contents:
-            files.append(f"lib/{item['name']}")
-
-    auto_url = (
-        f"repos/{full_name}/contents/auto"
-        f"?ref={branch}"
-    )
-    auto_contents = gh_api(auto_url)
-    if auto_contents and isinstance(auto_contents, list):
-        for item in auto_contents:
-            files.append(f"auto/{item['name']}")
-
-    return files
-
-
-def get_file_content(full_name, path, branch):
-    """Fetch a file's content from GitHub."""
-    url = (
-        f"repos/{full_name}/contents/{path}"
-        f"?ref={branch}"
-    )
-    data = gh_api(url)
-    if not data or "content" not in data:
-        return None
-    try:
-        return base64.b64decode(
-            data["content"]
-        ).decode("utf-8", errors="replace")
-    except (ValueError, UnicodeDecodeError):
-        return None
-
-
-def detect_build_system(files):
-    """Detect the build system from the file list."""
-    for indicator, system in BUILD_SYSTEM_INDICATORS:
-        if indicator in files:
-            return system
-    return "unknown"
-
-
-def detect_configure_flags(full_name, branch, build_system, files):
-    """Inspect configure.ac or CMakeLists.txt to detect optional dependencies."""
-    flags = []
-    apt_packages = []
-
-    if build_system == "autoconf" and "configure.ac" in files:
-        content = get_file_content(
-            full_name, "configure.ac", branch
+        Returns (flags, apt_packages) tuple.
+        """
+        config = self._CONFIG_FILES.get(
+            build_system
         )
-        if content:
-            content_lower = content.lower()
-            for dep_name, dep_info in KNOWN_DEPENDENCIES.items():
-                if (dep_name.lower() in content_lower
-                        and dep_info["configure_flag"]):
-                    flags.append(dep_info["configure_flag"])
-                    apt_packages.extend(dep_info["apt_packages"])
+        if config is None:
+            return [], []
 
-    elif build_system == "cmake" and "CMakeLists.txt" in files:
-        content = get_file_content(
-            full_name, "CMakeLists.txt", branch
+        config_file, flag_key = config
+        if config_file not in files:
+            return [], []
+
+        content = self.github.get_file_content(
+            full_name, config_file, branch
         )
-        if content:
-            content_lower = content.lower()
-            for dep_name, dep_info in KNOWN_DEPENDENCIES.items():
-                if (dep_name.lower() in content_lower
-                        and dep_info["cmake_flag"]):
-                    flags.append(dep_info["cmake_flag"])
-                    apt_packages.extend(dep_info["apt_packages"])
+        if not content:
+            return [], []
 
-    elif (build_system == "configure-only"
-          and "configure" in files):
-        content = get_file_content(
-            full_name, "configure", branch
-        )
-        if content:
-            content_lower = content.lower()
-            for dep_name, dep_info in KNOWN_DEPENDENCIES.items():
-                if (dep_name.lower() in content_lower
-                        and dep_info["configure_flag"]):
-                    flags.append(dep_info["configure_flag"])
-                    apt_packages.extend(dep_info["apt_packages"])
+        flags = []
+        apt_packages = []
+        content_lower = content.lower()
 
-    return flags, list(set(apt_packages))
-
-
-def detect_output_binaries(
-    full_name, repo_name, build_system, files
-):
-    """Guess the output binary paths based on repo structure and build system."""
-    binaries = []
-
-    # Check for Makefile.am or Makefile to find bin_PROGRAMS / lib_LTLIBRARIES
-    makefiles = ["Makefile.am", "src/Makefile.am"]
-    for mf in makefiles:
-        if mf in files:
-            content = get_file_content(
-                full_name, mf, "HEAD"
-            )
-            if content:
-                pat_bin = r'bin_PROGRAMS\s*[+=]\s*(.+)'
-                for m in re.findall(pat_bin, content):
-                    for prog in m.split():
-                        binaries.append(prog.strip())
-                pat_lib = (
-                    r'lib_LTLIBRARIES\s*[+=]\s*(.+)'
+        for dep_name, dep_info in (
+            self.known_deps.items()
+        ):
+            flag = dep_info.get(flag_key, "")
+            if (
+                dep_name.lower() in content_lower
+                and flag
+            ):
+                flags.append(flag)
+                apt_packages.extend(
+                    dep_info.get("apt_packages", [])
                 )
-                for m in re.findall(pat_lib, content):
-                    for lib in m.split():
-                        lib_name = lib.strip().replace(
-                            ".la", ".so"
-                        )
-                        binaries.append(
-                            f"lib/.libs/{lib_name}"
-                        )
 
-    # Fallback: common patterns
-    if not binaries:
-        # Check if there's a src/ directory with the repo name
+        return flags, list(set(apt_packages))
+
+
+# ============================================================
+# Output binary detection
+# ============================================================
+
+class BinaryDetector:
+    """Detects output binary paths from Makefiles and repo structure."""
+
+    def __init__(self, github=None):
+        self.github = github or GitHubClient()
+
+    def detect(
+        self, full_name, repo_name,
+        build_system, files,
+    ):
+        """Guess the output binary paths."""
+        binaries = []
+
+        makefiles = [
+            "Makefile.am", "src/Makefile.am",
+        ]
+        for mf in makefiles:
+            if mf in files:
+                content = (
+                    self.github.get_file_content(
+                        full_name, mf, "HEAD"
+                    )
+                )
+                if content:
+                    binaries.extend(
+                        self._parse_makefile(content)
+                    )
+
+        if not binaries:
+            binaries = self._fallback(
+                repo_name, files
+            )
+
+        return binaries
+
+    @staticmethod
+    def _parse_makefile(content):
+        """Extract binaries from Makefile.am content."""
+        binaries = []
+        pat_bin = r'bin_PROGRAMS\s*[+=]\s*(.+)'
+        for m in re.findall(pat_bin, content):
+            for prog in m.split():
+                binaries.append(prog.strip())
+
+        pat_lib = r'lib_LTLIBRARIES\s*[+=]\s*(.+)'
+        for m in re.findall(pat_lib, content):
+            for lib in m.split():
+                lib_name = lib.strip().replace(
+                    ".la", ".so"
+                )
+                binaries.append(
+                    f"lib/.libs/{lib_name}"
+                )
+        return binaries
+
+    @staticmethod
+    def _fallback(repo_name, files):
+        """Fallback binary detection from repo structure."""
         if any(f.startswith("src/") for f in files):
-            binaries.append(f"src/.libs/{repo_name}")
-            binaries.append(f"src/{repo_name}")
-        else:
-            binaries.append(repo_name)
-
-    return binaries
-
-
-def generate_build_steps(build_system, configure_flags):
-    """Generate build_steps based on build system and flags."""
-    steps = []
-
-    if build_system == "autoconf":
-        steps.append("autoreconf -fi")
-        configure_cmd = "./configure"
-        if configure_flags:
-            flags = " ".join(configure_flags)
-            configure_cmd += " " + flags
-        steps.append(configure_cmd)
-        steps.append("make -j$(nproc)")
-
-    elif build_system == "cmake":
-        base = "mkdir -p build && cd build && cmake .."
-        if configure_flags:
-            flags = " ".join(configure_flags)
-            base += " " + flags
-        steps.append(base)
-        steps.append("make -C build -j$(nproc)")
-
-    elif build_system == "meson":
-        steps.append("meson setup build")
-        steps.append("ninja -C build")
-
-    elif build_system == "perl-configure":
-        steps.append("./config")
-        steps.append("make -j$(nproc)")
-
-    elif build_system == "auto-configure":
-        steps.append("auto/configure")
-        steps.append("make -j$(nproc)")
-
-    elif build_system == "configure-only":
-        configure_cmd = "./configure"
-        if configure_flags:
-            configure_cmd += " " + " ".join(configure_flags)
-        steps.append(configure_cmd)
-        steps.append("make -j$(nproc)")
-
-    elif build_system == "make-only":
-        steps.append("make -j$(nproc)")
-
-    else:
-        steps.append(
-            "# TODO: determine build steps manually"
-        )
-        steps.append("make -j$(nproc)")
-
-    return steps
+            return [
+                f"src/.libs/{repo_name}",
+                f"src/{repo_name}",
+            ]
+        return [repo_name]
 
 
-def get_repo_stats(full_name):
-    """Get lines of code estimate from GitHub API."""
-    data = gh_api(f"repos/{full_name}/languages")
-    if not data:
-        return ""
-    total_bytes = sum(data.values())
-    # Rough estimate: 40 bytes per line
-    loc_k = total_bytes / 40 / 1000
-    top_langs = sorted(
-        data.items(), key=lambda x: x[1], reverse=True
-    )[:3]
-    lang_str = ", ".join(lang for lang, _ in top_langs)
-    return f"~{loc_k:.0f}K LoC, {lang_str}"
+# ============================================================
+# Build step generation
+# ============================================================
 
+class BuildStepGenerator:
+    """Generates build commands based on build system type."""
 
-def generate_config_entry(
-    repo_name, repo_info, build_system,
-    build_steps, output_binaries, description
-):
-    """Generate the YAML config entry as a dict."""
-    return {
-        "url": (
-            f"https://github.com/"
-            f"{repo_info['fullName']}.git"
-        ),
-        "branch": repo_info["defaultBranch"],
-        "build_steps": build_steps,
-        "clean_cmd": "make clean",
-        "description": description,
-        "output_binaries": output_binaries,
+    _RECIPES = {
+        "autoconf": "_autoconf",
+        "cmake": "_cmake",
+        "meson": "_meson",
+        "perl-configure": "_perl_configure",
+        "auto-configure": "_auto_configure",
+        "configure-only": "_configure_only",
+        "make-only": "_make_only",
     }
 
+    def generate(self, build_system, flags):
+        """Return a list of shell commands to build."""
+        method_name = self._RECIPES.get(
+            build_system
+        )
+        if method_name:
+            method = getattr(self, method_name)
+            return method(flags)
+        return self._unknown(flags)
 
-def write_config_entry(repo_name, entry):
-    """Append the repo entry to config.yaml."""
-    config_path = Path(__file__).parent / "config.yaml"
-    with open(config_path, "r", encoding="utf-8") as f:
-        config = yaml.safe_load(f)
+    @staticmethod
+    def _autoconf(flags):
+        steps = ["autoreconf -fi"]
+        cmd = "./configure"
+        if flags:
+            cmd += " " + " ".join(flags)
+        steps.append(cmd)
+        steps.append("make -j$(nproc)")
+        return steps
 
-    if repo_name in config.get("repos", {}):
+    @staticmethod
+    def _cmake(flags):
+        base = (
+            "mkdir -p build && cd build && cmake .."
+        )
+        if flags:
+            base += " " + " ".join(flags)
+        return [base, "make -C build -j$(nproc)"]
+
+    @staticmethod
+    def _meson(_flags):
+        return [
+            "meson setup build",
+            "ninja -C build",
+        ]
+
+    @staticmethod
+    def _perl_configure(_flags):
+        return ["./config", "make -j$(nproc)"]
+
+    @staticmethod
+    def _auto_configure(_flags):
+        return ["auto/configure", "make -j$(nproc)"]
+
+    @staticmethod
+    def _configure_only(flags):
+        cmd = "./configure"
+        if flags:
+            cmd += " " + " ".join(flags)
+        return [cmd, "make -j$(nproc)"]
+
+    @staticmethod
+    def _make_only(_flags):
+        return ["make -j$(nproc)"]
+
+    @staticmethod
+    def _unknown(_flags):
+        return [
+            "# TODO: determine build steps manually",
+            "make -j$(nproc)",
+        ]
+
+
+# ============================================================
+# Config generation and persistence
+# ============================================================
+
+class ConfigGenerator:
+    """Generates and writes config.yaml entries."""
+
+    def __init__(self, config_path=None):
+        self.config_path = config_path or (
+            Path(__file__).parent / "config.yaml"
+        )
+
+    def generate_entry(
+        self, repo_info, build_steps,
+        output_binaries, description,
+    ):
+        """Generate the YAML config entry as a dict."""
+        return {
+            "url": (
+                "https://github.com/"
+                f"{repo_info['fullName']}.git"
+            ),
+            "branch": repo_info["defaultBranch"],
+            "build_steps": build_steps,
+            "clean_cmd": "make clean",
+            "description": description,
+            "output_binaries": output_binaries,
+        }
+
+    def write_entry(self, repo_name, entry):
+        """Append the repo entry to config.yaml."""
+        with open(
+            self.config_path, "r", encoding="utf-8"
+        ) as f:
+            config = yaml.safe_load(f)
+
+        if repo_name in config.get("repos", {}):
+            print(
+                f"[WARN] '{repo_name}' already in "
+                "config.yaml — overwriting"
+            )
+
+        config["repos"][repo_name] = entry
+
+        with open(
+            self.config_path, "w", encoding="utf-8"
+        ) as f:
+            yaml.dump(
+                config, f,
+                default_flow_style=False,
+                sort_keys=False, width=120,
+            )
+
         print(
-            f"[WARN] '{repo_name}' already in "
-            "config.yaml — overwriting"
+            f"[OK] Written to {self.config_path}"
         )
 
-    config["repos"][repo_name] = entry
+    @staticmethod
+    def create_output_dirs(repo_name):
+        """Create the output directory structure."""
+        base = Path(__file__).parent.parent
+        dirs = [
+            base / "output" / "omnibor" / repo_name,
+            base / "output" / "spdx" / repo_name,
+            base / "output" / "binary-scan"
+            / repo_name,
+            base / "docs" / repo_name,
+        ]
+        for d in dirs:
+            d.mkdir(parents=True, exist_ok=True)
+            print(f"  [DIR] {d}")
 
-    with open(config_path, "w", encoding="utf-8") as f:
-        yaml.dump(
-            config, f,
-            default_flow_style=False,
-            sort_keys=False, width=120
+    @staticmethod
+    def get_repo_stats(full_name, github):
+        """Get lines of code estimate from GitHub."""
+        data = github.get_languages(full_name)
+        if not data:
+            return ""
+        total_bytes = sum(data.values())
+        loc_k = total_bytes / 40 / 1000
+        top_langs = sorted(
+            data.items(),
+            key=lambda x: x[1],
+            reverse=True,
+        )[:3]
+        lang_str = ", ".join(
+            lang for lang, _ in top_langs
+        )
+        return f"~{loc_k:.0f}K LoC, {lang_str}"
+
+
+# ============================================================
+# Facade: RepoDiscovery
+# ============================================================
+
+class RepoDiscovery:
+    """Orchestrates the full repo discovery pipeline.
+
+    Composes GitHubClient, BuildSystemDetector,
+    DependencyAnalyzer, BinaryDetector,
+    BuildStepGenerator, and ConfigGenerator.
+    """
+
+    def __init__(
+        self,
+        github=None,
+        data_loader=None,
+        detector=None,
+        analyzer=None,
+        binary_detector=None,
+        step_generator=None,
+        config_generator=None,
+    ):
+        self.github = github or GitHubClient()
+        self.data = data_loader or DataLoader()
+
+        indicators = self.data.load_build_systems()
+        deps = self.data.load_dependencies()
+
+        self.detector = detector or (
+            BuildSystemDetector(indicators)
+        )
+        self.analyzer = analyzer or (
+            DependencyAnalyzer(deps, self.github)
+        )
+        self.binary_detector = binary_detector or (
+            BinaryDetector(self.github)
+        )
+        self.steps = step_generator or (
+            BuildStepGenerator()
+        )
+        self.config = config_generator or (
+            ConfigGenerator()
         )
 
-    print(f"[OK] Written to {config_path}")
+    @staticmethod
+    def build_description(
+        repo_info, stats, repo_name
+    ):
+        """Build a description string from repo info."""
+        desc_parts = []
+        if repo_info.get("description"):
+            desc = repo_info["description"]
+            if len(desc) > 60:
+                desc = desc[:57] + "..."
+            desc_parts.append(desc)
+        if stats:
+            desc_parts.append(f"({stats})")
+        return (
+            " ".join(desc_parts)
+            if desc_parts
+            else repo_name
+        )
 
 
-def create_output_dirs(repo_name):
-    """Create the output directory structure for the repo."""
-    base = Path(__file__).parent.parent
-    dirs = [
-        base / "output" / "omnibor" / repo_name,
-        base / "output" / "spdx" / repo_name,
-        base / "output" / "binary-scan" / repo_name,
-        base / "docs" / repo_name,
-    ]
-    for d in dirs:
-        d.mkdir(parents=True, exist_ok=True)
-        print(f"  [DIR] {d}")
-
+# ============================================================
+# CLI entry point
+# ============================================================
 
 def main():
     parser = argparse.ArgumentParser(
-        description="OmniBOR — Smart repo discovery and config generation"
+        description=(
+            "OmniBOR — Smart repo discovery "
+            "and config generation"
+        )
     )
     parser.add_argument(
         "repo",
         help=(
             "Repo name (e.g., 'curl'), "
             "owner/repo, or full GitHub URL"
-        )
+        ),
     )
     parser.add_argument(
         "--write", action="store_true",
-        help="Write the entry to config.yaml"
+        help="Write the entry to config.yaml",
     )
     parser.add_argument(
         "--dry-run", action="store_true",
-        help="Show generated config without writing"
+        help="Show generated config without writing",
     )
     args = parser.parse_args()
 
     print(f"\n{'='*60}")
-    print(f"  OmniBOR — Add Repository: {args.repo}")
+    print(
+        f"  OmniBOR — Add Repository: {args.repo}"
+    )
     print(f"{'='*60}\n")
 
-    # Step 1: Find the repo on GitHub
+    discovery = RepoDiscovery()
+
+    # Step 1: Find repo
     print("[1/6] Searching GitHub...")
-    repo_info = get_repo_info(args.repo)
+    repo_info = discovery.github.get_repo_info(
+        args.repo
+    )
     if not repo_info:
-        print(f"[ERROR] Could not find repository for '{args.repo}'")
+        print(
+            "[ERROR] Could not find repository "
+            f"for '{args.repo}'"
+        )
         sys.exit(1)
 
     full_name = repo_info["fullName"]
     branch = repo_info["defaultBranch"]
     repo_name = full_name.split("/")[-1].lower()
-    stars = repo_info.get('stargazersCount', '?')
+    stars = repo_info.get("stargazersCount", "?")
     print(f"  Found: {full_name} ({stars} stars)")
     print(f"  Branch: {branch}")
-    lang = repo_info.get('language', 'unknown')
-    desc = repo_info.get('description', 'N/A')
+    lang = repo_info.get("language", "unknown")
+    desc = repo_info.get("description", "N/A")
     print(f"  Language: {lang}")
     print(f"  Description: {desc}")
 
-    # Step 2: Get file tree
+    # Step 2: File tree
     print("\n[2/6] Inspecting repository contents...")
-    files = get_repo_tree(full_name, branch)
+    files = discovery.github.get_file_tree(
+        full_name, branch
+    )
     if not files:
-        print("[ERROR] Could not read repository file tree")
+        print(
+            "[ERROR] Could not read repository "
+            "file tree"
+        )
         sys.exit(1)
     print(
         f"  Found {len(files)} files in "
         "top-level + src/ + lib/"
     )
 
-    # Step 3: Detect build system
+    # Step 3: Build system
     print("\n[3/6] Detecting build system...")
-    build_system = detect_build_system(files)
+    build_system = discovery.detector.detect(files)
     print(f"  Build system: {build_system}")
 
-    # Step 4: Detect configure flags and dependencies
+    # Step 4: Dependencies
     print("\n[4/6] Analyzing dependencies...")
-    configure_flags, apt_packages = detect_configure_flags(
-        full_name, branch, build_system, files
+    flags, apt_packages = (
+        discovery.analyzer.analyze(
+            full_name, branch, build_system, files
+        )
     )
-    if configure_flags:
-        flags_str = ' '.join(configure_flags)
+    if flags:
+        flags_str = " ".join(flags)
         print(f"  Configure flags: {flags_str}")
     else:
-        print("  No optional dependency flags detected")
+        print(
+            "  No optional dependency flags detected"
+        )
     if apt_packages:
-        pkgs_str = ', '.join(sorted(apt_packages))
-        print(f"  Required apt packages: {pkgs_str}")
+        pkgs_str = ", ".join(sorted(apt_packages))
+        print(
+            f"  Required apt packages: {pkgs_str}"
+        )
 
-    # Step 5: Detect output binaries
+    # Step 5: Binaries
     print("\n[5/6] Identifying output binaries...")
-    output_binaries = detect_output_binaries(
+    binaries = discovery.binary_detector.detect(
         full_name, repo_name, build_system, files
     )
-    for b in output_binaries:
+    for b in binaries:
         print(f"  - {b}")
 
-    # Step 6: Generate config
+    # Step 6: Config
     print("\n[6/6] Generating config entry...")
-    stats = get_repo_stats(full_name)
-    desc_parts = []
-    if repo_info.get("description"):
-        # Truncate long descriptions
-        desc = repo_info["description"]
-        if len(desc) > 60:
-            desc = desc[:57] + "..."
-        desc_parts.append(desc)
-    if stats:
-        desc_parts.append(f"({stats})")
-    description = " ".join(desc_parts) if desc_parts else repo_name
-
-    build_steps = generate_build_steps(build_system, configure_flags)
-    entry = generate_config_entry(
-        repo_name, repo_info, build_system,
-        build_steps, output_binaries, description
+    stats = discovery.config.get_repo_stats(
+        full_name, discovery.github
+    )
+    description = discovery.build_description(
+        repo_info, stats, repo_name
+    )
+    build_steps = discovery.steps.generate(
+        build_system, flags
+    )
+    entry = discovery.config.generate_entry(
+        repo_info, build_steps,
+        binaries, description,
     )
 
-    # Display the generated YAML
-    sep = '=' * 60
+    # Display YAML
+    sep = "=" * 60
     print(f"\n{sep}")
     print(
         f"  Generated config.yaml entry for "
@@ -537,7 +741,7 @@ def main():
     yaml_str = yaml.dump(
         {repo_name: entry},
         default_flow_style=False,
-        sort_keys=False, width=120
+        sort_keys=False, width=120,
     )
     print(yaml_str)
 
@@ -545,7 +749,6 @@ def main():
         print(f"{sep}")
         print("  Required Dockerfile additions:")
         print(f"{sep}\n")
-        # Check which packages are already in the Dockerfile
         dockerfile_path = (
             Path(__file__).parent.parent
             / "docker" / "Dockerfile"
@@ -569,11 +772,12 @@ def main():
             for pkg in new_pkgs:
                 print(f"    {pkg}")
             installed = (
-                ', '.join(sorted(existing_pkgs))
-                or 'none'
+                ", ".join(sorted(existing_pkgs))
+                or "none"
             )
             print(
-                f"\n  Already installed: {installed}"
+                "\n  Already installed: "
+                f"{installed}"
             )
         else:
             print(
@@ -583,9 +787,13 @@ def main():
 
     if args.write:
         print("\n[WRITE] Writing to config.yaml...")
-        write_config_entry(repo_name, entry)
+        discovery.config.write_entry(
+            repo_name, entry
+        )
         print("\n[WRITE] Creating output dirs...")
-        create_output_dirs(repo_name)
+        discovery.config.create_output_dirs(
+            repo_name
+        )
         print(
             f"\n[DONE] '{repo_name}' is ready. Run:"
         )

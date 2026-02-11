@@ -39,6 +39,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `/add-repo` workflow now uses `app/add_repo.py` for automated config generation instead of manual editing
 - `BUILD_SYSTEM_INDICATORS` and `KNOWN_DEPENDENCIES` replaced with external JSON data files loaded via `data_loader.py` (no more hardcoded static lists)
+- Refactored `app/add_repo.py` from procedural to class-based architecture using design patterns:
+
+  - `GitHubClient` — encapsulates all gh CLI / GitHub API interactions
+  - `BuildSystemDetector` — detects build system from file list (Strategy pattern via indicator list)
+  - `DependencyAnalyzer` — inspects config files for dependency flags
+  - `BinaryDetector` — detects output binaries from Makefiles
+  - `BuildStepGenerator` — generates build commands per build system (Strategy pattern via recipe dispatch)
+  - `ConfigGenerator` — generates and writes config.yaml entries
+  - `RepoDiscovery` — facade orchestrating the full pipeline (Facade pattern)
+
+- Refactored `app/data_loader.py` from procedural to class-based architecture:
+
+  - `HttpClient` — minimal HTTP transport with user-agent
+  - `JsonCache` — atomic JSON read/write with age tracking
+  - `RepologyResolver` — resolves library names to Debian -dev packages (Strategy pattern)
+  - `DataLoader` — main facade composing the above
+  - Module-level convenience functions preserved for backward compatibility
+
+- Refactored `app/analyze.py` from procedural to class-based architecture:
+
+  - `CommandRunner` — wraps subprocess execution with logging
+  - `RepoCloner` — handles git clone logic
+  - `BomtraceBuilder` — instrumented build with bomtrace3 and ADG generation
+  - `SpdxGenerator` — generates SPDX SBOM from OmniBOR data
+  - `SyftGenerator` — generates baseline manifest SBOM via Syft
+  - `DocWriter` — writes build logs and runtime metrics
+  - `AnalysisPipeline` — facade orchestrating the full workflow (Facade pattern)
+
+- Refactored `app/compare.py` from procedural to class-based architecture:
+
+  - `SpdxLoader` — loads and parses SPDX JSON files
+  - `PackageExtractor` — extracts and normalizes package data
+  - `SbomComparator` — compares two SPDX package sets
+  - `ReportGenerator` — generates markdown comparison reports
+  - `ComparisonPipeline` — facade orchestrating the full workflow (Facade pattern)
+
+- Rewrote all tests to use class-based API (207 tests, 99% coverage)
 
 ## [0.1.0] - 2026-02-10
 
