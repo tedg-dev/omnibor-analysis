@@ -48,6 +48,49 @@ The patched `Makefile.am` does not correctly declare this dependency, so with pa
 
 bomtrace2 does **not** have this issue because its patch does not add custom `.c` files.
 
+## Python Dependency Management
+
+Python runtime dependencies are managed via `requirements.txt` at the project root. This file is the **single source of truth** — used by both the Docker container and local development.
+
+| File | Purpose | Where installed |
+|------|---------|-----------------|
+| `requirements.txt` | Runtime deps (e.g. PyYAML) | Docker container + local `.venv` |
+| `requirements-dev.txt` | Dev/test deps (pytest, coverage) | Local `.venv` only |
+
+**Adding a new Python dependency:**
+
+1. Add it to `requirements.txt` (with pinned version)
+2. Run `pip install -r requirements.txt` locally
+3. Rebuild the Docker image: `docker-compose -f docker/docker-compose.yml build`
+
+**Do NOT** add ad-hoc `pip install` commands to the Dockerfile. The Dockerfile `COPY`s `requirements.txt` from the project root and installs from it.
+
+**Local setup:**
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-dev.txt
+```
+
+## C/C++ Build Dependencies (apt_deps)
+
+Each target repo in `config.yaml` has an `apt_deps` list specifying the `-dev` packages required for its build. These packages must be installed in the Docker image.
+
+**How it works:**
+
+1. `config.yaml` lists `apt_deps` per repo (mapped to `--with-*` / `--enable-*` configure flags)
+2. `analyze.py`'s `DependencyValidator` checks all `apt_deps` are installed before building
+3. If any are missing, it prints an actionable error with the exact `apt-get install` command
+
+**Adding a new target repo:**
+
+1. Run `python3 app/add_repo.py <repo>` — it auto-detects dependencies and generates `apt_deps`
+2. Add any missing packages to the Dockerfile's `apt-get install` block
+3. Rebuild the image: `docker-compose -f docker/docker-compose.yml build`
+
+**Why explicit lists?** C/C++ `./configure` scripts auto-detect libraries at build time. A missing `-dev` package may silently disable a feature or cause a cryptic error later. Explicit `apt_deps` make the contract clear and verifiable.
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
@@ -57,3 +100,4 @@ bomtrace2 does **not** have this issue because its patch does not add custom `.c
 | `stringop-overflow` error in `bomsh_hook.c` | Upstream bomsh bug: `strcpy` into `PATH_MAX` buffer triggers GCC warning, `-Werror` makes it fatal | Pass `CFLAGS="-g -O2 -Wno-error=stringop-overflow"` to `make` for bomtrace3 |
 | `patch: Hunk FAILED` | strace version incompatible with bomsh patches | Pin strace to a known-good tag (currently v6.11) |
 | Build takes 30+ minutes | QEMU emulation on Apple Silicon | Normal — x86 emulation is slow; layers are cached after first build |
+| `ModuleNotFoundError: No module named 'yaml'` | Python deps not installed in container | Rebuild image after verifying `requirements.txt` exists at project root |

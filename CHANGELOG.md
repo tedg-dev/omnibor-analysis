@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Add `requirements.txt` and `requirements-dev.txt` as single source of truth for Python dependencies
+- Dockerfile now `COPY`s and installs from `requirements.txt` instead of ad-hoc `pip install` commands
+- Docker build context changed to project root so Dockerfile can access `requirements.txt`
+- Fixes `ModuleNotFoundError: No module named 'yaml'` when running app scripts inside the container
 - Pin strace to v6.11 for stable bomtrace2/bomtrace3 patch application
 - Force `linux/amd64` platform in docker-compose (bomtrace3 requires x86 `sys/reg.h`)
 - Use `make -j1` for bomtrace3 to avoid `printers.h` parallel build race condition
@@ -17,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Per-repo `apt_deps` field in `config.yaml` — explicitly lists required `-dev` packages for each target repo's build
+- `DependencyValidator` class in `analyze.py` — checks all `apt_deps` are installed (via `dpkg-query`) before starting an instrumented build; prints actionable install hints on failure
+- `ConfigGenerator.generate_entry()` now includes discovered `apt_deps` in generated config entries
+- Explicit `apt_deps` for `curl` (10 packages) and `ffmpeg` (13 packages) in `config.yaml`
 - `app/add_repo.py` — smart repo discovery script that auto-generates `config.yaml` entries from just a repo name using GitHub API (`gh` CLI)
   - Detects build systems: autoconf, cmake, meson, perl-configure (OpenSSL), auto-configure (nginx), configure-only (FFmpeg), make-only
   - Analyzes `configure.ac` / `CMakeLists.txt` / `configure` for dependency flags

@@ -14,6 +14,19 @@ repos:
     output_binaries:
       - src/.libs/curl
       - lib/.libs/libcurl.so
+    # Required -dev packages for this repo's build.
+    # Explicit = required by --with-* flags; auto-detected = probed by ./configure.
+    apt_deps:
+      - libssl-dev        # --with-openssl
+      - zlib1g-dev        # --with-zlib
+      - libnghttp2-dev    # --with-nghttp2
+      - libssh2-1-dev     # --with-libssh2
+      - libbrotli-dev     # --with-brotli
+      - libpsl-dev        # auto-detected (cookie PSL)
+      - libzstd-dev       # auto-detected (zstd compression)
+      - libc-ares-dev     # auto-detected (async DNS)
+      - libidn2-dev       # auto-detected (IDN support)
+      - libpcre2-dev      # auto-detected (regex)
 
   ffmpeg:
     url: https://github.com/FFmpeg/FFmpeg.git
@@ -44,6 +57,22 @@ repos:
       - libavformat/libavformat.so
       - libavutil/libavutil.so
       - libswscale/libswscale.so
+    # Required -dev packages for this repo's build.
+    # All are explicit --enable-* flags in ./configure.
+    apt_deps:
+      - libssl-dev          # --enable-openssl
+      - libx264-dev         # --enable-libx264
+      - libx265-dev         # --enable-libx265
+      - libvpx-dev          # --enable-libvpx
+      - libopus-dev         # --enable-libopus
+      - libmp3lame-dev      # --enable-libmp3lame
+      - libfdk-aac-dev      # --enable-libfdk-aac
+      - libfreetype-dev     # --enable-libfreetype
+      - libfontconfig1-dev  # --enable-libfontconfig
+      - libfribidi-dev      # --enable-libfribidi
+      - libass-dev          # --enable-libass
+      - nasm                # x86 assembly optimization
+      - yasm                # x86 assembly optimization
 
 # Paths (relative to /workspace inside container)
 paths:

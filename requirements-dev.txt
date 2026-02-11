@@ -1,0 +1,6 @@
+# Development/testing dependencies (local only, not needed in Docker).
+# Install with: pip install -r requirements-dev.txt
+-r requirements.txt
+pytest==9.0.2
+pytest-cov==7.0.0
+coverage==7.13.4
