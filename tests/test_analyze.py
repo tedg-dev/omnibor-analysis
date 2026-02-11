@@ -277,6 +277,7 @@ class TestBomtraceBuilder(unittest.TestCase):
                     "./configure",
                     "make -j4",
                 ],
+                "clean_cmd": "make clean",
             },
             {"repos_dir": "/repos", "output_dir": "/out"},
             {
@@ -297,10 +298,27 @@ class TestBomtraceBuilder(unittest.TestCase):
                 "curl", repo_cfg, paths, omnibor
             )
         self.assertTrue(result)
+        # clean + 2 pre-build + instrumented + ADG = 5
+        self.assertEqual(runner.run.call_count, 5)
+
+    def test_success_no_clean_cmd(self):
+        runner = MagicMock()
+        runner.run.return_value = 0
+        builder = BomtraceBuilder(runner)
+        repo_cfg, paths, omnibor = self._cfg()
+        del repo_cfg["clean_cmd"]
+
+        with patch("builtins.print"):
+            result = builder.build(
+                "curl", repo_cfg, paths, omnibor
+            )
+        self.assertTrue(result)
+        # no clean + 2 pre-build + instrumented + ADG = 4
         self.assertEqual(runner.run.call_count, 4)
 
     def test_prebuild_failure(self):
         runner = MagicMock()
+        # clean ok, first pre-build fails
         runner.run.side_effect = [0, 1]
         builder = BomtraceBuilder(runner)
         repo_cfg, paths, omnibor = self._cfg()
@@ -313,7 +331,8 @@ class TestBomtraceBuilder(unittest.TestCase):
 
     def test_make_failure(self):
         runner = MagicMock()
-        runner.run.side_effect = [0, 0, 1]
+        # clean ok, 2 pre-build ok, instrumented fails
+        runner.run.side_effect = [0, 0, 0, 1]
         builder = BomtraceBuilder(runner)
         repo_cfg, paths, omnibor = self._cfg()
 
@@ -325,7 +344,8 @@ class TestBomtraceBuilder(unittest.TestCase):
 
     def test_adg_failure(self):
         runner = MagicMock()
-        runner.run.side_effect = [0, 0, 0, 1]
+        # clean ok, 2 pre-build ok, instrumented ok, ADG fails
+        runner.run.side_effect = [0, 0, 0, 0, 1]
         builder = BomtraceBuilder(runner)
         repo_cfg, paths, omnibor = self._cfg()
 
@@ -334,6 +354,19 @@ class TestBomtraceBuilder(unittest.TestCase):
                 "curl", repo_cfg, paths, omnibor
             )
         self.assertFalse(result)
+
+    def test_clean_failure_ignored(self):
+        runner = MagicMock()
+        # clean fails (fresh clone), rest succeeds
+        runner.run.side_effect = [1, 0, 0, 0, 0]
+        builder = BomtraceBuilder(runner)
+        repo_cfg, paths, omnibor = self._cfg()
+
+        with patch("builtins.print"):
+            result = builder.build(
+                "curl", repo_cfg, paths, omnibor
+            )
+        self.assertTrue(result)
 
     def test_instrumented_cmd_uses_tracer(self):
         runner = MagicMock()
@@ -345,9 +378,10 @@ class TestBomtraceBuilder(unittest.TestCase):
             builder.build(
                 "curl", repo_cfg, paths, omnibor
             )
-        third_call = runner.run.call_args_list[2]
+        # clean(0) + pre-build(1,2) + instrumented(3)
+        instrumented_call = runner.run.call_args_list[3]
         self.assertIn(
-            "bomtrace3", third_call[0][0]
+            "bomtrace3", instrumented_call[0][0]
         )
 
 

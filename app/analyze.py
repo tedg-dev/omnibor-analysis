@@ -209,6 +209,23 @@ class BomtraceBuilder:
         tracer = omnibor_cfg["tracer"]
         raw_logfile = omnibor_cfg["raw_logfile"]
 
+        # Clean stale build artifacts so bomtrace3
+        # intercepts a full recompilation.
+        # Without this, a prior build leaves object
+        # files in place and make becomes a no-op —
+        # bomtrace3 intercepts zero compiler calls
+        # and bomsh_create_bom.py has no data.
+        clean_cmd = repo_cfg.get("clean_cmd")
+        if clean_cmd:
+            self.runner.run(
+                clean_cmd, cwd=str(repo_dir),
+                description=(
+                    f"Clean: {clean_cmd}"
+                ),
+            )
+            # Ignore clean_cmd exit code — it may
+            # fail on a fresh clone (nothing to clean)
+
         # Pre-build steps (configure, etc.)
         build_steps = repo_cfg["build_steps"]
         for step in build_steps[:-1]:
