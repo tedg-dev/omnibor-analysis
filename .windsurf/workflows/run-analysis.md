@@ -57,7 +57,7 @@ rsync -avz omnibor-build:/root/omnibor-analysis/docs/ docs/
 
 This downloads:
 
-- `output/binaries/<repo>/` — compiled binaries (curl, libcurl.so, etc.)
+- `output/binaries/<repo>/<timestamp>/` — compiled binaries (curl, libcurl.so, etc.)
 - `output/omnibor/<repo>/` — OmniBOR ADG documents
 - `output/spdx/<repo>/` — SPDX SBOMs (OmniBOR + Syft)
 - `docs/<repo>/` — build logs
@@ -78,7 +78,7 @@ This downloads:
 
 | Artifact | Path |
 |----------|------|
-| Output binaries | `output/binaries/<repo>/` |
+| Output binaries | `output/binaries/<repo>/<ts>/` |
 | OmniBOR ADG | `output/omnibor/<repo>/` |
 | SPDX SBOM (OmniBOR) | `output/spdx/<repo>/<repo>_omnibor_<ts>.spdx.json` |
 | SPDX SBOM (Syft) | `output/spdx/<repo>/<repo>_syft_<ts>.spdx.json` |

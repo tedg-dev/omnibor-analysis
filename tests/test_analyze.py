@@ -436,6 +436,244 @@ class TestSpdxGenerator(unittest.TestCase):
 
 
 # ============================================================
+# SpdxGenerator — creator patching
+# ============================================================
+
+class TestSpdxGeneratorMetadata(unittest.TestCase):
+    """Tests for SpdxGenerator.patch_spdx_metadata()."""
+
+    def _write_spdx(self, tmpdir, doc):
+        import json
+        path = Path(tmpdir) / "test.spdx.json"
+        path.write_text(json.dumps(doc))
+        return str(path)
+
+    def test_patches_creators_and_namespace(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/file/"
+                    "curl-a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [
+                        "Tool: syft-1.42.0"
+                    ],
+                },
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1-5823f7d",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path
+                )
+
+            self.assertTrue(ok)
+            result = json.loads(
+                Path(path).read_text()
+            )
+            # --- creators ---
+            creators = (
+                result["creationInfo"]["creators"]
+            )
+            self.assertEqual(len(creators), 4)
+            self.assertIn(
+                "Tool: syft-1.42.0", creators
+            )
+            self.assertIn(
+                "Tool: bomtrace3-6.11", creators
+            )
+            self.assertIn(
+                "Tool: bomsh-0.0.1-5823f7d",
+                creators,
+            )
+            self.assertTrue(
+                any(
+                    "omnibor-analysis" in c
+                    for c in creators
+                )
+            )
+            # --- namespace ---
+            ns = result["documentNamespace"]
+            self.assertIn("omnibor.io", ns)
+            self.assertIn("curl", ns)
+            self.assertIn(
+                "a1b2c3d4-e5f6-7890-abcd-"
+                "ef1234567890",
+                ns,
+            )
+            self.assertNotIn("anchore.com", ns)
+
+    def test_patch_idempotent(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/file/"
+                    "curl-a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [
+                        "Tool: syft-1.42.0"
+                    ],
+                },
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                SpdxGenerator.patch_spdx_metadata(path)
+                SpdxGenerator.patch_spdx_metadata(path)
+
+            result = json.loads(
+                Path(path).read_text()
+            )
+            creators = (
+                result["creationInfo"]["creators"]
+            )
+            # Should not duplicate entries
+            self.assertEqual(len(creators), 4)
+
+    def test_patch_missing_file(self):
+        ok = SpdxGenerator.patch_spdx_metadata(
+            "/nonexistent.json"
+        )
+        self.assertFalse(ok)
+
+    def test_patch_invalid_json(self):
+        with tempfile.NamedTemporaryFile(
+            suffix=".json", mode="w", delete=False,
+        ) as f:
+            f.write("not json{{{")
+            path = f.name
+        try:
+            ok = SpdxGenerator.patch_spdx_metadata(
+                path
+            )
+            self.assertFalse(ok)
+        finally:
+            Path(path).unlink()
+
+    def test_patch_no_creation_info(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            doc = {"spdxVersion": "SPDX-2.3"}
+            path = self._write_spdx(td, doc)
+            ok = SpdxGenerator.patch_spdx_metadata(
+                path
+            )
+            self.assertFalse(ok)
+
+    def test_namespace_no_uuid_uses_timestamp(self):
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://example.com/no-uuid"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [],
+                },
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch(
+                "analyze.timestamp",
+                return_value="2026-02-12_1300",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path
+                )
+            self.assertTrue(ok)
+            result = json.loads(
+                Path(path).read_text()
+            )
+            ns = result["documentNamespace"]
+            self.assertIn("omnibor.io", ns)
+            self.assertIn(
+                "2026-02-12_1300", ns
+            )
+
+    def test_bomsh_version_fallback(self):
+        with patch(
+            "subprocess.check_output",
+            side_effect=Exception("no cmd"),
+        ):
+            ver = SpdxGenerator._bomsh_version()
+        self.assertEqual(ver, "unknown")
+
+    def test_bomtrace_version_fallback(self):
+        with patch(
+            "subprocess.check_output",
+            side_effect=Exception("no cmd"),
+        ):
+            ver = SpdxGenerator._bomtrace_version()
+        self.assertEqual(ver, "unknown")
+
+    def test_generate_calls_patch_on_success(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = MagicMock()
+            runner.run.return_value = 0
+            gen = SpdxGenerator(runner)
+            paths = {"output_dir": td}
+            omnibor = {
+                "sbom_script": "/usr/bin/sbom",
+            }
+            with patch.object(
+                SpdxGenerator,
+                "patch_spdx_metadata",
+            ) as mock_patch, patch(
+                "builtins.print"
+            ):
+                result = gen.generate(
+                    "curl", paths, omnibor
+                )
+            mock_patch.assert_called_once_with(
+                result
+            )
+
+    def test_generate_skips_patch_on_failure(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = MagicMock()
+            runner.run.return_value = 1
+            gen = SpdxGenerator(runner)
+            paths = {"output_dir": td}
+            omnibor = {"sbom_script": "x"}
+            with patch.object(
+                SpdxGenerator,
+                "patch_spdx_metadata",
+            ) as mock_patch, patch(
+                "builtins.print"
+            ):
+                gen.generate("curl", paths, omnibor)
+            mock_patch.assert_not_called()
+
+
+# ============================================================
 # SpdxValidator
 # ============================================================
 
@@ -757,7 +995,8 @@ class TestSyftGenerator(unittest.TestCase):
 class TestBinaryCollector(unittest.TestCase):
     """Tests for BinaryCollector."""
 
-    def test_collect_copies_binaries(self):
+    @patch("analyze.timestamp", return_value="2026-02-12_1300")
+    def test_collect_copies_binaries(self, _ts):
         with tempfile.TemporaryDirectory() as tmpdir:
             # Create fake repo with a binary
             repo_dir = Path(tmpdir) / "repos" / "curl"
@@ -788,12 +1027,16 @@ class TestBinaryCollector(unittest.TestCase):
             dst = Path(result[0][1])
             self.assertTrue(dst.exists())
             self.assertEqual(dst.name, "curl")
+            self.assertIn(
+                "2026-02-12_1300", str(dst)
+            )
             self.assertEqual(
                 dst.read_bytes(),
                 b"\x7fELF fake binary",
             )
 
-    def test_collect_missing_binary_warns(self):
+    @patch("analyze.timestamp", return_value="2026-02-12_1300")
+    def test_collect_missing_binary_warns(self, _ts):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir) / "repos" / "curl"
             repo_dir.mkdir(parents=True)
@@ -851,7 +1094,8 @@ class TestBinaryCollector(unittest.TestCase):
         output = "\n".join(printed)
         self.assertIn("No output_binaries", output)
 
-    def test_collect_multiple_binaries(self):
+    @patch("analyze.timestamp", return_value="2026-02-12_1300")
+    def test_collect_multiple_binaries(self, _ts):
         with tempfile.TemporaryDirectory() as tmpdir:
             repo_dir = Path(tmpdir) / "repos" / "curl"
             (repo_dir / "src" / ".libs").mkdir(
@@ -890,6 +1134,7 @@ class TestBinaryCollector(unittest.TestCase):
             out_dir = (
                 Path(tmpdir) / "output"
                 / "binaries" / "curl"
+                / "2026-02-12_1300"
             )
             self.assertTrue(
                 (out_dir / "curl").exists()
