@@ -22,43 +22,39 @@ PR-first workflow, no direct commits to main).
 
 **Do not proceed to any task until this step is complete.**
 
-## 1. Verify Docker is running
+## 1. Verify SSH access to DigitalOcean build droplet
+
+All bomtrace3 instrumented builds run on a remote DigitalOcean droplet
+(native x86_64 Linux). Local Docker is NOT needed.
 
 ```bash
-docker info --format '{{.ServerVersion}}' 2>/dev/null || echo "Docker is NOT running"
+ssh omnibor-build "uname -m && docker --version" 2>/dev/null || echo "Droplet is NOT reachable — it may be powered off"
 ```
 
-## 2. Check if the omnibor-analysis image exists
+If the droplet is powered off, remind the user to start it from the
+DigitalOcean dashboard (cloud.digitalocean.com → Droplets → omnibor-build → Power On).
 
-```bash
-docker images omnibor-analysis --format "{{.Repository}}:{{.Tag}} ({{.Size}}, created {{.CreatedSince}})"
-```
+SSH config is in `~/.ssh/config` under host `omnibor-build` (IP: 137.184.178.186).
 
-If no image exists, build it:
-
-```bash
-docker-compose -f docker/docker-compose.yml build
-```
-
-## 3. Verify key project files
+## 2. Verify key project files
 
 ```bash
 ls -la app/config.yaml app/analyze.py app/compare.py docker/Dockerfile docker/docker-compose.yml
 ```
 
-## 4. Check which repos are cloned
+## 3. Check which repos are cloned (on droplet)
 
 ```bash
-ls -d repos/*/ 2>/dev/null || echo "No repos cloned yet"
+ssh omnibor-build "ls -d /root/omnibor-analysis/repos/*/ 2>/dev/null || echo 'No repos cloned yet'"
 ```
 
-## 5. Check for existing output artifacts
+## 4. Check for existing output artifacts (on droplet)
 
 ```bash
-find output/ -name "*.spdx.json" -o -name "*.sha1" 2>/dev/null | head -20 || echo "No output artifacts yet"
+ssh omnibor-build "find /root/omnibor-analysis/output/ -name '*.spdx.json' -o -name '*.sha1' 2>/dev/null | head -20 || echo 'No output artifacts yet'"
 ```
 
-## 6. Check for existing docs/reports
+## 5. Check for existing docs/reports (local)
 
 ```bash
 find docs/ -name "*.md" -not -name ".gitkeep" 2>/dev/null | sort | tail -10 || echo "No reports yet"

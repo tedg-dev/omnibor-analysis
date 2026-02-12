@@ -18,7 +18,8 @@ import analyze
 from analyze import (
     CommandRunner, DependencyValidator,
     RepoCloner, BomtraceBuilder,
-    SpdxGenerator, SyftGenerator, DocWriter,
+    SpdxGenerator, SpdxValidator,
+    SyftGenerator, BinaryCollector, DocWriter,
     AnalysisPipeline, load_config, timestamp,
 )
 
@@ -400,7 +401,6 @@ class TestSpdxGenerator(unittest.TestCase):
             paths = {"output_dir": tmpdir}
             omnibor = {
                 "sbom_script": "/usr/bin/sbom",
-                "raw_logfile": "/tmp/log",
             }
 
             with patch("builtins.print"):
@@ -419,7 +419,6 @@ class TestSpdxGenerator(unittest.TestCase):
             paths = {"output_dir": tmpdir}
             omnibor = {
                 "sbom_script": "x",
-                "raw_logfile": "y",
             }
 
             printed = []
@@ -434,6 +433,275 @@ class TestSpdxGenerator(unittest.TestCase):
                 gen.generate("curl", paths, omnibor)
             output = "\n".join(printed)
             self.assertIn("WARN", output)
+
+
+# ============================================================
+# SpdxValidator
+# ============================================================
+
+class TestSpdxValidator(unittest.TestCase):
+    """Tests for SpdxValidator."""
+
+    def _minimal_spdx(self):
+        """Return a minimal valid SPDX 2.3 JSON dict."""
+        return {
+            "spdxVersion": "SPDX-2.3",
+            "dataLicense": "CC0-1.0",
+            "SPDXID": "SPDXRef-DOCUMENT",
+            "name": "test-doc",
+            "documentNamespace": (
+                "https://example.org/test"
+            ),
+            "creationInfo": {
+                "created": "2026-01-01T00:00:00Z",
+                "creators": ["Tool: test"],
+            },
+        }
+
+    def test_validate_file_not_found(self):
+        v = SpdxValidator()
+        printed = []
+        with patch(
+            "builtins.print",
+            side_effect=lambda *a, **kw: (
+                printed.append(
+                    " ".join(str(x) for x in a)
+                )
+            ),
+        ):
+            result = v.validate("/nonexistent.json")
+        self.assertIsNone(result["schema_ok"])
+        self.assertIsNone(result["semantic_ok"])
+        self.assertIn(
+            "not found",
+            "\n".join(printed),
+        )
+
+    def test_validate_invalid_json(self):
+        import json
+        v = SpdxValidator()
+        with tempfile.NamedTemporaryFile(
+            suffix=".spdx.json", mode="w",
+            delete=False,
+        ) as f:
+            f.write("not json{{{")
+            path = f.name
+        try:
+            printed = []
+            with patch(
+                "builtins.print",
+                side_effect=lambda *a, **kw: (
+                    printed.append(
+                        " ".join(str(x) for x in a)
+                    )
+                ),
+            ):
+                result = v.validate(path)
+            self.assertIsNone(result["schema_ok"])
+            output = "\n".join(printed)
+            self.assertIn("Cannot read", output)
+        finally:
+            Path(path).unlink()
+
+    def test_schema_validation_pass(self):
+        """Minimal SPDX doc should pass schema."""
+        import json
+        v = SpdxValidator()
+        with tempfile.NamedTemporaryFile(
+            suffix=".spdx.json", mode="w",
+            delete=False,
+        ) as f:
+            json.dump(self._minimal_spdx(), f)
+            path = f.name
+        try:
+            with patch("builtins.print"):
+                result = v.validate(path)
+            # Schema should pass (or be skipped if
+            # network unavailable)
+            if result["schema_ok"] is not None:
+                self.assertTrue(result["schema_ok"])
+        finally:
+            Path(path).unlink()
+
+    def test_schema_validation_fail(self):
+        """Invalid doc should fail schema."""
+        import json
+        v = SpdxValidator()
+        bad_doc = {"not": "spdx"}
+        with tempfile.NamedTemporaryFile(
+            suffix=".spdx.json", mode="w",
+            delete=False,
+        ) as f:
+            json.dump(bad_doc, f)
+            path = f.name
+        try:
+            with patch("builtins.print"):
+                result = v.validate(path)
+            if result["schema_ok"] is not None:
+                self.assertFalse(result["schema_ok"])
+                self.assertTrue(
+                    len(result["schema_errors"]) > 0
+                )
+        finally:
+            Path(path).unlink()
+
+    def test_schema_skipped_when_jsonschema_missing(
+        self,
+    ):
+        """Schema check skipped if jsonschema absent."""
+        import json
+        v = SpdxValidator()
+        with tempfile.NamedTemporaryFile(
+            suffix=".spdx.json", mode="w",
+            delete=False,
+        ) as f:
+            json.dump(self._minimal_spdx(), f)
+            path = f.name
+        try:
+            import builtins
+            real_import = builtins.__import__
+
+            def mock_import(name, *args, **kwargs):
+                if name == "jsonschema":
+                    raise ImportError("mocked")
+                return real_import(
+                    name, *args, **kwargs
+                )
+
+            with patch(
+                "builtins.__import__",
+                side_effect=mock_import,
+            ):
+                with patch("builtins.print"):
+                    result = v.validate(path)
+            self.assertIsNone(result["schema_ok"])
+        finally:
+            Path(path).unlink()
+
+    def test_semantic_skipped_when_spdx_tools_missing(
+        self,
+    ):
+        """Semantic check skipped if spdx-tools absent."""
+        import json
+        v = SpdxValidator()
+        with tempfile.NamedTemporaryFile(
+            suffix=".spdx.json", mode="w",
+            delete=False,
+        ) as f:
+            json.dump(self._minimal_spdx(), f)
+            path = f.name
+        try:
+            import builtins
+            real_import = builtins.__import__
+
+            def mock_import(name, *args, **kwargs):
+                if "spdx_tools" in name:
+                    raise ImportError("mocked")
+                return real_import(
+                    name, *args, **kwargs
+                )
+
+            with patch(
+                "builtins.__import__",
+                side_effect=mock_import,
+            ):
+                with patch("builtins.print"):
+                    result = v.validate(path)
+            self.assertIsNone(result["semantic_ok"])
+        finally:
+            Path(path).unlink()
+
+    def test_semantic_parse_error(self):
+        """Semantic fails gracefully on unparseable doc."""
+        import json
+        v = SpdxValidator()
+        bad_doc = {"spdxVersion": "SPDX-2.3"}
+        with tempfile.NamedTemporaryFile(
+            suffix=".spdx.json", mode="w",
+            delete=False,
+        ) as f:
+            json.dump(bad_doc, f)
+            path = f.name
+        try:
+            with patch("builtins.print"):
+                result = v.validate(path)
+            if result["semantic_ok"] is not None:
+                self.assertFalse(result["semantic_ok"])
+                self.assertTrue(
+                    len(result["semantic_errors"]) > 0
+                )
+        finally:
+            Path(path).unlink()
+
+    def test_print_summary_pass(self):
+        """Summary prints PASS for valid results."""
+        printed = []
+        with patch(
+            "builtins.print",
+            side_effect=lambda *a, **kw: (
+                printed.append(
+                    " ".join(str(x) for x in a)
+                )
+            ),
+        ):
+            SpdxValidator._print_summary(
+                "/tmp/test.spdx.json",
+                {
+                    "schema_ok": True,
+                    "semantic_ok": True,
+                    "schema_errors": [],
+                    "semantic_errors": [],
+                },
+            )
+        output = "\n".join(printed)
+        self.assertIn("PASS", output)
+
+    def test_print_summary_fail(self):
+        """Summary prints FAIL with error count."""
+        printed = []
+        with patch(
+            "builtins.print",
+            side_effect=lambda *a, **kw: (
+                printed.append(
+                    " ".join(str(x) for x in a)
+                )
+            ),
+        ):
+            SpdxValidator._print_summary(
+                "/tmp/test.spdx.json",
+                {
+                    "schema_ok": False,
+                    "semantic_ok": False,
+                    "schema_errors": ["err1", "err2"],
+                    "semantic_errors": ["err3"],
+                },
+            )
+        output = "\n".join(printed)
+        self.assertIn("FAIL", output)
+        self.assertIn("2 errors", output)
+
+    def test_print_summary_skipped(self):
+        """Summary prints SKIPPED when None."""
+        printed = []
+        with patch(
+            "builtins.print",
+            side_effect=lambda *a, **kw: (
+                printed.append(
+                    " ".join(str(x) for x in a)
+                )
+            ),
+        ):
+            SpdxValidator._print_summary(
+                "/tmp/test.spdx.json",
+                {
+                    "schema_ok": None,
+                    "semantic_ok": None,
+                    "schema_errors": [],
+                    "semantic_errors": [],
+                },
+            )
+        output = "\n".join(printed)
+        self.assertIn("SKIPPED", output)
 
 
 # ============================================================
@@ -480,6 +748,155 @@ class TestSyftGenerator(unittest.TestCase):
                 gen.generate("curl", paths)
             output = "\n".join(printed)
             self.assertIn("WARN", output)
+
+
+# ============================================================
+# BinaryCollector
+# ============================================================
+
+class TestBinaryCollector(unittest.TestCase):
+    """Tests for BinaryCollector."""
+
+    def test_collect_copies_binaries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            # Create fake repo with a binary
+            repo_dir = Path(tmpdir) / "repos" / "curl"
+            (repo_dir / "src" / ".libs").mkdir(
+                parents=True
+            )
+            binary = repo_dir / "src" / ".libs" / "curl"
+            binary.write_bytes(b"\x7fELF fake binary")
+
+            paths = {
+                "repos_dir": str(Path(tmpdir) / "repos"),
+                "output_dir": str(
+                    Path(tmpdir) / "output"
+                ),
+            }
+            cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
+
+            with patch("builtins.print"):
+                result = BinaryCollector.collect(
+                    "curl", cfg, paths
+                )
+
+            self.assertEqual(len(result), 1)
+            dst = Path(result[0][1])
+            self.assertTrue(dst.exists())
+            self.assertEqual(dst.name, "curl")
+            self.assertEqual(
+                dst.read_bytes(),
+                b"\x7fELF fake binary",
+            )
+
+    def test_collect_missing_binary_warns(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir) / "repos" / "curl"
+            repo_dir.mkdir(parents=True)
+
+            paths = {
+                "repos_dir": str(Path(tmpdir) / "repos"),
+                "output_dir": str(
+                    Path(tmpdir) / "output"
+                ),
+            }
+            cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
+
+            printed = []
+            with patch(
+                "builtins.print",
+                side_effect=lambda *a, **kw: (
+                    printed.append(
+                        " ".join(str(x) for x in a)
+                    )
+                ),
+            ):
+                result = BinaryCollector.collect(
+                    "curl", cfg, paths
+                )
+
+            self.assertEqual(len(result), 0)
+            output = "\n".join(printed)
+            self.assertIn("not found", output)
+
+    def test_collect_no_output_binaries_defined(self):
+        paths = {
+            "repos_dir": "/tmp",
+            "output_dir": "/tmp",
+        }
+        cfg = {}
+
+        printed = []
+        with patch(
+            "builtins.print",
+            side_effect=lambda *a, **kw: (
+                printed.append(
+                    " ".join(str(x) for x in a)
+                )
+            ),
+        ):
+            result = BinaryCollector.collect(
+                "curl", cfg, paths
+            )
+
+        self.assertEqual(len(result), 0)
+        output = "\n".join(printed)
+        self.assertIn("No output_binaries", output)
+
+    def test_collect_multiple_binaries(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            repo_dir = Path(tmpdir) / "repos" / "curl"
+            (repo_dir / "src" / ".libs").mkdir(
+                parents=True
+            )
+            (repo_dir / "lib" / ".libs").mkdir(
+                parents=True
+            )
+            (
+                repo_dir / "src" / ".libs" / "curl"
+            ).write_bytes(b"bin1")
+            (
+                repo_dir / "lib" / ".libs"
+                / "libcurl.so"
+            ).write_bytes(b"bin2")
+
+            paths = {
+                "repos_dir": str(Path(tmpdir) / "repos"),
+                "output_dir": str(
+                    Path(tmpdir) / "output"
+                ),
+            }
+            cfg = {
+                "output_binaries": [
+                    "src/.libs/curl",
+                    "lib/.libs/libcurl.so",
+                ],
+            }
+
+            with patch("builtins.print"):
+                result = BinaryCollector.collect(
+                    "curl", cfg, paths
+                )
+
+            self.assertEqual(len(result), 2)
+            out_dir = (
+                Path(tmpdir) / "output"
+                / "binaries" / "curl"
+            )
+            self.assertTrue(
+                (out_dir / "curl").exists()
+            )
+            self.assertTrue(
+                (out_dir / "libcurl.so").exists()
+            )
 
 
 # ============================================================
@@ -582,7 +999,13 @@ class TestAnalysisPipeline(unittest.TestCase):
             p.spdx_gen, SpdxGenerator
         )
         self.assertIsInstance(
+            p.spdx_validator, SpdxValidator
+        )
+        self.assertIsInstance(
             p.syft_gen, SyftGenerator
+        )
+        self.assertIsInstance(
+            p.binary_collector, BinaryCollector
         )
         self.assertIsInstance(p.docs, DocWriter)
 
@@ -627,7 +1050,9 @@ def _mock_pipeline():
     cloner = MagicMock()
     builder = MagicMock()
     spdx_gen = MagicMock()
+    spdx_validator = MagicMock()
     syft_gen = MagicMock()
+    binary_collector = MagicMock()
     doc_writer = MagicMock()
     return AnalysisPipeline(
         runner=runner,
@@ -635,7 +1060,9 @@ def _mock_pipeline():
         cloner=cloner,
         builder=builder,
         spdx_gen=spdx_gen,
+        spdx_validator=spdx_validator,
         syft_gen=syft_gen,
+        binary_collector=binary_collector,
         doc_writer=doc_writer,
     )
 
@@ -711,6 +1138,8 @@ class TestMainFullRun(unittest.TestCase):
         p.validator.validate.assert_called_once()
         p.builder.build.assert_called_once()
         p.spdx_gen.generate.assert_called_once()
+        p.spdx_validator.validate.assert_called_once()
+        p.binary_collector.collect.assert_called_once()
         p.docs.write_build_doc.assert_called_once()
         p.docs.write_runtime_doc.assert_called_once()
 
@@ -755,6 +1184,8 @@ class TestMainFullRun(unittest.TestCase):
             analyze.main()
 
         p.spdx_gen.generate.assert_not_called()
+        p.spdx_validator.validate.assert_not_called()
+        p.binary_collector.collect.assert_not_called()
         p.docs.write_build_doc.assert_called_once()
 
     @patch("analyze.time.time")

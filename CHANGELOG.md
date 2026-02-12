@@ -21,6 +21,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `SpdxValidator` class in `analyze.py` — two-phase SPDX v2.3 validation:
+  1. JSON Schema validation against the official SPDX 2.3 schema (via `jsonschema`)
+  2. Semantic validation via `spdx-tools` (`parse_file` + `validate_full_spdx_document`)
+  Either phase degrades gracefully if its library is unavailable
+- SPDX validation step (Step 6) added to the analysis pipeline, runs after SPDX generation
+- `BinaryCollector` class in `analyze.py` — copies `output_binaries` from the build tree into `output/binaries/<repo>/` for download to local Mac
+- `jsonschema==4.23.0` and `spdx-tools==0.8.2` added to `requirements.txt`
+- DigitalOcean droplet (`omnibor-build`) for native x86_64 bomtrace3 builds — replaces local Docker
+- Droplet shutdown reminder rule (`.windsurf/rules/droplet-shutdown.md`)
+- bomtrace3 QEMU/Rosetta debug findings documented (`docs/bomtrace3-qemu-debug.md`)
+- GitHub Issue draft for omnibor/bomsh QEMU bugs (`docs/github-issue-bomsh-qemu.md`)
+
+### Fixed
+
+- `bomsh_sbom.py` CLI invocation — removed incorrect `-r` flag (means `--remove_intermediate_files`, not raw logfile)
+
+### Changed
+
+- Setup-environment workflow now checks SSH to DigitalOcean droplet instead of local Docker
+- Docker rules updated: builds run on remote droplet, local Docker no longer required
 - Per-repo `apt_deps` field in `config.yaml` — explicitly lists required `-dev` packages for each target repo's build
 - `DependencyValidator` class in `analyze.py` — checks all `apt_deps` are installed (via `dpkg-query`) before starting an instrumented build; prints actionable install hints on failure
 - `ConfigGenerator.generate_entry()` now includes discovered `apt_deps` in generated config entries
