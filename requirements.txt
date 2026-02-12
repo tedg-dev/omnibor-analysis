@@ -2,3 +2,5 @@
 # Used by BOTH the Docker container and local development.
 # Keep in sync: Dockerfile installs this file, local .venv installs this file.
 PyYAML==6.0.3
+jsonschema==4.23.0
+spdx-tools==0.8.2
