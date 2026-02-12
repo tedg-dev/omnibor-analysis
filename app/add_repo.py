@@ -466,9 +466,10 @@ class ConfigGenerator:
     def generate_entry(
         self, repo_info, build_steps,
         output_binaries, description,
+        apt_deps=None,
     ):
         """Generate the YAML config entry as a dict."""
-        return {
+        entry = {
             "url": (
                 "https://github.com/"
                 f"{repo_info['fullName']}.git"
@@ -479,6 +480,9 @@ class ConfigGenerator:
             "description": description,
             "output_binaries": output_binaries,
         }
+        if apt_deps:
+            entry["apt_deps"] = sorted(apt_deps)
+        return entry
 
     def write_entry(self, repo_name, entry):
         """Append the repo entry to config.yaml."""
@@ -728,6 +732,7 @@ def main():
     entry = discovery.config.generate_entry(
         repo_info, build_steps,
         binaries, description,
+        apt_deps=apt_packages,
     )
 
     # Display YAML

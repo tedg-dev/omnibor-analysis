@@ -3,8 +3,9 @@ services:
     # REQUIRED: bomtrace3 needs x86 (sys/reg.h). Uses QEMU on Apple Silicon.
     platform: linux/amd64
     build:
-      context: .
-      dockerfile: Dockerfile
+      # Context is project root so Dockerfile can COPY requirements.txt
+      context: ..
+      dockerfile: docker/Dockerfile
     container_name: omnibor-analysis
     volumes:
       # Mount repos directory for cloned source code

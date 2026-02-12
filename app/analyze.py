@@ -16,6 +16,7 @@ Usage:
 Classes:
 
     - CommandRunner: wraps subprocess execution with logging
+    - DependencyValidator: checks apt_deps are installed before build
     - RepoCloner: handles git clone logic
     - BomtraceBuilder: instrumented build with bomtrace3
     - SpdxGenerator: generates SPDX SBOM from OmniBOR data
@@ -83,6 +84,68 @@ class CommandRunner:
 
 
 # ============================================================
+# Dependency validation
+# ============================================================
+
+class DependencyValidator:
+    """Checks that required apt packages are installed before build.
+
+    Reads the apt_deps list from a repo's config entry and
+    verifies each package is installed via dpkg-query.
+    """
+
+    def __init__(self, runner=None):
+        self.runner = runner or CommandRunner()
+
+    def validate(self, repo_cfg):
+        """Check all apt_deps are installed.
+
+        Returns (ok, missing) where ok is True if all
+        deps are present, and missing is a list of
+        package names that are not installed.
+        """
+        apt_deps = repo_cfg.get("apt_deps", [])
+        if not apt_deps:
+            return True, []
+
+        missing = []
+        for pkg in apt_deps:
+            rc = self.runner.run(
+                f"dpkg-query -W -f='${{Status}}' "
+                f"{pkg} 2>/dev/null "
+                "| grep -q 'install ok installed'",
+                description=(
+                    f"Checking dependency: {pkg}"
+                ),
+            )
+            if rc != 0:
+                missing.append(pkg)
+
+        if missing:
+            print(
+                f"\n[ERROR] Missing {len(missing)} "
+                "required package(s):"
+            )
+            for pkg in missing:
+                print(f"  - {pkg}")
+            print(
+                "\nInstall them with:\n"
+                f"  apt-get install -y "
+                f"{' '.join(missing)}\n"
+                "\nOr add them to the Dockerfile's "
+                "apt-get install list and rebuild "
+                "the image.\n"
+            )
+            return False, missing
+
+        print(
+            f"[OK] All {len(apt_deps)} "
+            "apt dependencies verified"
+        )
+        return True, []
+
+
+# ============================================================
 # Repository cloning
 # ============================================================
 
@@ -145,6 +208,23 @@ class BomtraceBuilder:
         )
         tracer = omnibor_cfg["tracer"]
         raw_logfile = omnibor_cfg["raw_logfile"]
+
+        # Clean stale build artifacts so bomtrace3
+        # intercepts a full recompilation.
+        # Without this, a prior build leaves object
+        # files in place and make becomes a no-op —
+        # bomtrace3 intercepts zero compiler calls
+        # and bomsh_create_bom.py has no data.
+        clean_cmd = repo_cfg.get("clean_cmd")
+        if clean_cmd:
+            self.runner.run(
+                clean_cmd, cwd=str(repo_dir),
+                description=(
+                    f"Clean: {clean_cmd}"
+                ),
+            )
+            # Ignore clean_cmd exit code — it may
+            # fail on a fresh clone (nothing to clean)
 
         # Pre-build steps (configure, etc.)
         build_steps = repo_cfg["build_steps"]
@@ -418,6 +498,7 @@ class AnalysisPipeline:
     def __init__(
         self,
         runner=None,
+        validator=None,
         cloner=None,
         builder=None,
         spdx_gen=None,
@@ -425,6 +506,10 @@ class AnalysisPipeline:
         doc_writer=None,
     ):
         self.runner = runner or CommandRunner()
+        self.validator = (
+            validator
+            or DependencyValidator(self.runner)
+        )
         self.cloner = cloner or RepoCloner(
             self.runner
         )
@@ -533,7 +618,20 @@ def main():
         )
         return
 
-    # Step 3: Instrumented build
+    # Step 3: Validate apt dependencies
+    deps_ok, missing = (
+        pipeline.validator.validate(repo_cfg)
+    )
+    if not deps_ok:
+        print(
+            "[ERROR] Cannot proceed — "
+            f"{len(missing)} missing package(s). "
+            "Add them to the Dockerfile and "
+            "rebuild the image."
+        )
+        sys.exit(1)
+
+    # Step 4: Instrumented build
     start = time.time()
     success = pipeline.builder.build(
         args.repo, repo_cfg,
@@ -541,13 +639,13 @@ def main():
     )
     duration = time.time() - start
 
-    # Step 4: Generate SPDX from OmniBOR
+    # Step 5: Generate SPDX from OmniBOR
     if success:
         pipeline.spdx_gen.generate(
             args.repo, paths_cfg, omnibor_cfg
         )
 
-    # Step 5: Write docs
+    # Step 6: Write docs
     pipeline.docs.write_build_doc(
         args.repo, repo_cfg, paths_cfg,
         success, duration,

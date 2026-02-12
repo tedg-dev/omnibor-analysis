@@ -941,6 +941,40 @@ class TestConfigGenerator(unittest.TestCase):
         self.assertEqual(
             entry["output_binaries"], ["src/curl"]
         )
+        self.assertNotIn("apt_deps", entry)
+
+    def test_generate_entry_with_apt_deps(self):
+        gen = ConfigGenerator()
+        repo_info = {
+            "fullName": "curl/curl",
+            "defaultBranch": "master",
+        }
+        entry = gen.generate_entry(
+            repo_info,
+            ["make"],
+            ["src/curl"],
+            "test",
+            apt_deps=[
+                "zlib1g-dev", "libssl-dev",
+            ],
+        )
+        self.assertIn("apt_deps", entry)
+        self.assertEqual(
+            entry["apt_deps"],
+            ["libssl-dev", "zlib1g-dev"],
+        )
+
+    def test_generate_entry_empty_apt_deps(self):
+        gen = ConfigGenerator()
+        repo_info = {
+            "fullName": "curl/curl",
+            "defaultBranch": "master",
+        }
+        entry = gen.generate_entry(
+            repo_info, ["make"], ["src/curl"],
+            "test", apt_deps=[],
+        )
+        self.assertNotIn("apt_deps", entry)
 
     def test_write_entry_new_repo(self):
         with tempfile.NamedTemporaryFile(

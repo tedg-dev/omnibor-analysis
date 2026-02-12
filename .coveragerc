@@ -1,0 +1,6 @@
+[run]
+# Exclude build-time patch scripts from coverage — they generate C code
+# and are not testable as Python application logic.
+omit =
+    app/apply_qemu_fallback.py
+    docker/patches/*

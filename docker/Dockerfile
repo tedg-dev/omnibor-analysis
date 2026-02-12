@@ -30,16 +30,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     binutils \
     elfutils \
     file \
-    # Common C/C++ library dev packages for target repos
+    # curl build dependencies (mapped from config.yaml configure flags)
+    # Explicit --with-* flags:
     libssl-dev \
     zlib1g-dev \
-    libpcre2-dev \
     libnghttp2-dev \
     libssh2-1-dev \
     libbrotli-dev \
+    # Auto-detected by curl's ./configure (will error if partially found):
+    libpsl-dev \
     libzstd-dev \
     libc-ares-dev \
     libidn2-dev \
+    libpcre2-dev \
     # FFmpeg dependencies
     nasm \
     yasm \
@@ -54,6 +57,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libfribidi-dev \
     libass-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ============================================================
+# Python runtime dependencies for app scripts
+# ============================================================
+# WHY: analyze.py, compare.py, and add_repo.py all import pyyaml.
+# requirements.txt is the single source of truth for Python deps,
+# shared between local development (.venv) and this container.
+# If a new Python dependency is added, update requirements.txt —
+# do NOT add ad-hoc pip install commands here.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt && \
+    rm /tmp/requirements.txt
 
 # ============================================================
 # Install Syft (manifest-based SBOM generation)

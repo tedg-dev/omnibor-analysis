@@ -16,7 +16,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "app"))
 
 import analyze
 from analyze import (
-    CommandRunner, RepoCloner, BomtraceBuilder,
+    CommandRunner, DependencyValidator,
+    RepoCloner, BomtraceBuilder,
     SpdxGenerator, SyftGenerator, DocWriter,
     AnalysisPipeline, load_config, timestamp,
 )
@@ -127,6 +128,84 @@ class TestCommandRunner(unittest.TestCase):
 
 
 # ============================================================
+# DependencyValidator
+# ============================================================
+
+class TestDependencyValidator(unittest.TestCase):
+    """Tests for DependencyValidator."""
+
+    def test_no_apt_deps(self):
+        runner = MagicMock()
+        v = DependencyValidator(runner)
+        ok, missing = v.validate({})
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+        runner.run.assert_not_called()
+
+    def test_empty_apt_deps(self):
+        runner = MagicMock()
+        v = DependencyValidator(runner)
+        ok, missing = v.validate({"apt_deps": []})
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+
+    def test_all_installed(self):
+        runner = MagicMock()
+        runner.run.return_value = 0
+        v = DependencyValidator(runner)
+        with patch("builtins.print"):
+            ok, missing = v.validate(
+                {"apt_deps": ["libssl-dev", "zlib1g-dev"]}
+            )
+        self.assertTrue(ok)
+        self.assertEqual(missing, [])
+        self.assertEqual(runner.run.call_count, 2)
+
+    def test_some_missing(self):
+        runner = MagicMock()
+        runner.run.side_effect = [0, 1, 0]
+        v = DependencyValidator(runner)
+        with patch("builtins.print"):
+            ok, missing = v.validate(
+                {"apt_deps": [
+                    "libssl-dev", "libpsl-dev",
+                    "zlib1g-dev",
+                ]}
+            )
+        self.assertFalse(ok)
+        self.assertEqual(missing, ["libpsl-dev"])
+
+    def test_all_missing(self):
+        runner = MagicMock()
+        runner.run.return_value = 1
+        v = DependencyValidator(runner)
+        with patch("builtins.print"):
+            ok, missing = v.validate(
+                {"apt_deps": ["a", "b"]}
+            )
+        self.assertFalse(ok)
+        self.assertEqual(missing, ["a", "b"])
+
+    def test_prints_install_hint(self):
+        runner = MagicMock()
+        runner.run.return_value = 1
+        v = DependencyValidator(runner)
+        printed = []
+        with patch(
+            "builtins.print",
+            side_effect=lambda *a, **kw: (
+                printed.append(
+                    " ".join(str(x) for x in a)
+                )
+            ),
+        ):
+            v.validate({"apt_deps": ["libfoo-dev"]})
+        output = "\n".join(printed)
+        self.assertIn("apt-get install", output)
+        self.assertIn("libfoo-dev", output)
+
+
+# ============================================================
 # RepoCloner
 # ============================================================
 
@@ -198,6 +277,7 @@ class TestBomtraceBuilder(unittest.TestCase):
                     "./configure",
                     "make -j4",
                 ],
+                "clean_cmd": "make clean",
             },
             {"repos_dir": "/repos", "output_dir": "/out"},
             {
@@ -218,10 +298,27 @@ class TestBomtraceBuilder(unittest.TestCase):
                 "curl", repo_cfg, paths, omnibor
             )
         self.assertTrue(result)
+        # clean + 2 pre-build + instrumented + ADG = 5
+        self.assertEqual(runner.run.call_count, 5)
+
+    def test_success_no_clean_cmd(self):
+        runner = MagicMock()
+        runner.run.return_value = 0
+        builder = BomtraceBuilder(runner)
+        repo_cfg, paths, omnibor = self._cfg()
+        del repo_cfg["clean_cmd"]
+
+        with patch("builtins.print"):
+            result = builder.build(
+                "curl", repo_cfg, paths, omnibor
+            )
+        self.assertTrue(result)
+        # no clean + 2 pre-build + instrumented + ADG = 4
         self.assertEqual(runner.run.call_count, 4)
 
     def test_prebuild_failure(self):
         runner = MagicMock()
+        # clean ok, first pre-build fails
         runner.run.side_effect = [0, 1]
         builder = BomtraceBuilder(runner)
         repo_cfg, paths, omnibor = self._cfg()
@@ -234,7 +331,8 @@ class TestBomtraceBuilder(unittest.TestCase):
 
     def test_make_failure(self):
         runner = MagicMock()
-        runner.run.side_effect = [0, 0, 1]
+        # clean ok, 2 pre-build ok, instrumented fails
+        runner.run.side_effect = [0, 0, 0, 1]
         builder = BomtraceBuilder(runner)
         repo_cfg, paths, omnibor = self._cfg()
 
@@ -246,7 +344,8 @@ class TestBomtraceBuilder(unittest.TestCase):
 
     def test_adg_failure(self):
         runner = MagicMock()
-        runner.run.side_effect = [0, 0, 0, 1]
+        # clean ok, 2 pre-build ok, instrumented ok, ADG fails
+        runner.run.side_effect = [0, 0, 0, 0, 1]
         builder = BomtraceBuilder(runner)
         repo_cfg, paths, omnibor = self._cfg()
 
@@ -255,6 +354,19 @@ class TestBomtraceBuilder(unittest.TestCase):
                 "curl", repo_cfg, paths, omnibor
             )
         self.assertFalse(result)
+
+    def test_clean_failure_ignored(self):
+        runner = MagicMock()
+        # clean fails (fresh clone), rest succeeds
+        runner.run.side_effect = [1, 0, 0, 0, 0]
+        builder = BomtraceBuilder(runner)
+        repo_cfg, paths, omnibor = self._cfg()
+
+        with patch("builtins.print"):
+            result = builder.build(
+                "curl", repo_cfg, paths, omnibor
+            )
+        self.assertTrue(result)
 
     def test_instrumented_cmd_uses_tracer(self):
         runner = MagicMock()
@@ -266,9 +378,10 @@ class TestBomtraceBuilder(unittest.TestCase):
             builder.build(
                 "curl", repo_cfg, paths, omnibor
             )
-        third_call = runner.run.call_args_list[2]
+        # clean(0) + pre-build(1,2) + instrumented(3)
+        instrumented_call = runner.run.call_args_list[3]
         self.assertIn(
-            "bomtrace3", third_call[0][0]
+            "bomtrace3", instrumented_call[0][0]
         )
 
 
@@ -458,6 +571,9 @@ class TestAnalysisPipeline(unittest.TestCase):
     def test_default_construction(self):
         p = AnalysisPipeline()
         self.assertIsInstance(p.runner, CommandRunner)
+        self.assertIsInstance(
+            p.validator, DependencyValidator
+        )
         self.assertIsInstance(p.cloner, RepoCloner)
         self.assertIsInstance(
             p.builder, BomtraceBuilder
@@ -506,6 +622,8 @@ class TestAnalysisPipeline(unittest.TestCase):
 def _mock_pipeline():
     """Create an AnalysisPipeline with all mocked components."""
     runner = MagicMock()
+    validator = MagicMock()
+    validator.validate.return_value = (True, [])
     cloner = MagicMock()
     builder = MagicMock()
     spdx_gen = MagicMock()
@@ -513,6 +631,7 @@ def _mock_pipeline():
     doc_writer = MagicMock()
     return AnalysisPipeline(
         runner=runner,
+        validator=validator,
         cloner=cloner,
         builder=builder,
         spdx_gen=spdx_gen,
@@ -589,10 +708,34 @@ class TestMainFullRun(unittest.TestCase):
 
         p.cloner.clone.assert_called_once()
         p.syft_gen.generate.assert_called_once()
+        p.validator.validate.assert_called_once()
         p.builder.build.assert_called_once()
         p.spdx_gen.generate.assert_called_once()
         p.docs.write_build_doc.assert_called_once()
         p.docs.write_runtime_doc.assert_called_once()
+
+    @patch("analyze.AnalysisPipeline")
+    @patch(
+        "sys.argv",
+        ["analyze.py", "--repo", "curl"],
+    )
+    def test_validation_failure_exits(
+        self, mock_cls
+    ):
+        p = _mock_pipeline()
+        mock_cls.return_value = p
+        p.validator.validate.return_value = (
+            False, ["libpsl-dev"]
+        )
+
+        with patch("builtins.print"):
+            with self.assertRaises(
+                SystemExit
+            ) as cm:
+                analyze.main()
+            self.assertEqual(cm.exception.code, 1)
+
+        p.builder.build.assert_not_called()
 
     @patch("analyze.time.time")
     @patch("analyze.AnalysisPipeline")
