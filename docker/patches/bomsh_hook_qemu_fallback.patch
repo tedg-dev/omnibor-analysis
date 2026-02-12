@@ -1,0 +1,119 @@
+--- a/.devcontainer/src/bomsh_hook.c
++++ b/.devcontainer/src/bomsh_hook.c
+@@ -730,6 +730,72 @@ copy_path(struct tcb *const tcp, const kernel_ulong_t addr)
+ 	return strdup(path);
+ }
+ 
++/*
++ * Fallback: read program path from /proc/<pid>/exe when ptrace-based
++ * copy_path() fails.  This happens under QEMU x86_64 emulation (e.g.
++ * Apple Silicon Docker) where strace cannot decode syscall registers
++ * without mpers support.
++ */
++static char *
++bomsh_proc_read_exe(pid_t pid)
++{
++	char link[32];
++	static char exe_path[PATH_MAX];
++	sprintf(link, "/proc/%d/exe", pid);
++	int bytes = readlink(link, exe_path, PATH_MAX - 1);
++	if (bytes <= 0) {
++		return NULL;
++	}
++	exe_path[bytes] = 0;
++	return strdup(exe_path);
++}
++
++/*
++ * Fallback: read argv from /proc/<pid>/cmdline when ptrace-based
++ * copy_argv_array() fails.  /proc/<pid>/cmdline contains NUL-separated
++ * arguments.
++ *
++ * Note: tracee_argv (pointers into tracee address space) cannot be
++ * recovered via /proc, so depfile instrumentation (which rewrites
++ * tracee argv in-place) will not work in this fallback path.  The
++ * caller should set tracee_argv to NULL.
++ */
++static char **
++bomsh_proc_read_cmdline(pid_t pid, int *out_argc)
++{
++	char path[32];
++	sprintf(path, "/proc/%d/cmdline", pid);
++	FILE *f = fopen(path, "r");
++	if (!f) {
++		if (out_argc) *out_argc = 0;
++		return NULL;
++	}
++	/* Read entire cmdline (max 128 KiB, well above any real command) */
++	char buf[131072];
++	size_t len = fread(buf, 1, sizeof(buf) - 1, f);
++	fclose(f);
++	if (len == 0) {
++		if (out_argc) *out_argc = 0;
++		return NULL;
++	}
++	buf[len] = 0;
++
++	/* Count arguments (NUL-separated) */
++	int argc = 0;
++	for (size_t i = 0; i < len; i++) {
++		if (buf[i] == 0) argc++;
++	}
++	if (buf[len - 1] != 0) argc++; /* last arg may lack trailing NUL */
++
++	char **argv = (char **)xmalloc((argc + 1) * sizeof(char *));
++	int idx = 0;
++	char *p = buf;
++	for (size_t i = 0; i < len && idx < argc; i++) {
++		if (i == 0 || buf[i - 1] == 0) {
++			argv[idx++] = strdup(p + i);
++		}
++	}
++	argv[idx] = NULL;
++	if (out_argc) *out_argc = idx;
++	return argv;
++}
++
+ static char * bomsh_get_rootdir(struct tcb *tcp)
+ {
+ 	char cwd_file[32] = "";
+@@ -976,7 +1042,16 @@ int bomsh_record_command(struct tcb *tcp, const unsigned int index)
+ 		return 0;
+ 	}
+ 	char *path = copy_path(tcp, tcp->u_arg[index + 0]);
+-	if (!path) {
++	if (!path) {
++		/* Fallback for QEMU/emulation where ptrace register
++		 * decoding fails (mpers not available).  Read the
++		 * program path from /proc/<pid>/exe instead. */
++		path = bomsh_proc_read_exe(tcp->pid);
++		if (path) {
++			bomsh_log_printf(4, "\n===proc fallback for pid %d path: %s\n", tcp->pid, path);
++		}
++	}
++	if (!path) {
+ 		return 0;
+ 	}
+ 	if (bomsh_is_detach_on_pid_program(path)) {
+@@ -1037,7 +1112,22 @@ int bomsh_record_command(struct tcb *tcp, const unsigned int index)
+ 	if (!(g_bomsh_config.generate_depfile & 3)) {
+ 		// trace_argv is only needed for depfile instrumentation, which is 0 mode
+ 		p_tracee_argv = &tracee_argv;
+ 	}
+ 	char **argv_array = copy_argv_array(tcp, tcp->u_arg[index + 1], &num_argv, p_tracee_argv);
++	if (!argv_array) {
++		/* Fallback for QEMU/emulation: read argv from
++		 * /proc/<pid>/cmdline.  tracee_argv will be NULL so
++		 * depfile instrumentation is disabled in this path. */
++		argv_array = bomsh_proc_read_cmdline(tcp->pid, &num_argv);
++		if (argv_array) {
++			bomsh_log_printf(4, "\n===proc fallback for pid %d argv (%d args)\n", tcp->pid, num_argv);
++			/* tracee_argv cannot be recovered from /proc,
++			 * so disable depfile instrumentation. */
++			tracee_argv = NULL;
++			p_tracee_argv = NULL;
++		}
++	}
+ 	bomsh_cmd_data_t *cmd = bomsh_add_cmd(tcp, pwd, rootdir, path, argv_array);
+ 	cmd->num_argv = num_argv;
+ 	cmd->tracee_argv = tracee_argv;
