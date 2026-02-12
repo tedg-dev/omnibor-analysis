@@ -284,10 +284,171 @@ class BomtraceBuilder:
 # ============================================================
 
 class SpdxGenerator:
-    """Generates SPDX SBOM from OmniBOR data."""
+    """Generates SPDX SBOM from OmniBOR data.
+
+    After bomsh_sbom.py writes the initial SPDX file,
+    this class patches ``creationInfo.creators`` to
+    credit the actual tools that produced the data:
+    bomtrace3 (build interception), bomsh (ADG + SPDX
+    enrichment), and omnibor-analysis (orchestration).
+    """
+
+    # Bomsh install dir — used to detect git commit
+    BOMSH_DIR = "/opt/bomsh"
 
     def __init__(self, runner=None):
         self.runner = runner or CommandRunner()
+
+    # --------------------------------------------------
+    # Version helpers
+    # --------------------------------------------------
+
+    @staticmethod
+    def _bomsh_version():
+        """Return bomsh version string.
+
+        Tries ``bomsh_create_bom.py --version``, then
+        falls back to the git short-rev of /opt/bomsh.
+        """
+        try:
+            out = subprocess.check_output(
+                ["bomsh_create_bom.py", "--version"],
+                stderr=subprocess.STDOUT,
+                text=True,
+            ).strip()
+            # output: "bomsh_create_bom.py 0.0.1"
+            ver = out.split()[-1] if out else None
+        except Exception:
+            ver = None
+
+        # Append git commit if available
+        try:
+            commit = subprocess.check_output(
+                [
+                    "git", "-C",
+                    SpdxGenerator.BOMSH_DIR,
+                    "rev-parse", "--short", "HEAD",
+                ],
+                stderr=subprocess.STDOUT,
+                text=True,
+            ).strip()
+        except Exception:
+            commit = None
+
+        if ver and commit:
+            return f"{ver}-{commit}"
+        if commit:
+            return f"git-{commit}"
+        if ver:
+            return ver
+        return "unknown"
+
+    @staticmethod
+    def _bomtrace_version():
+        """Return bomtrace3 version string."""
+        try:
+            out = subprocess.check_output(
+                ["bomtrace3", "--version"],
+                stderr=subprocess.STDOUT,
+                text=True,
+            ).strip()
+            # "strace -- version 6.11" or similar
+            if "version" in out.lower():
+                return out.split()[-1]
+            return out
+        except Exception:
+            return "unknown"
+
+    # --------------------------------------------------
+    # Creator patching
+    # --------------------------------------------------
+
+    # Namespace prefix for OmniBOR-generated SBOMs
+    NAMESPACE_PREFIX = (
+        "https://omnibor.io/omnibor-analysis"
+    )
+
+    @staticmethod
+    def patch_spdx_metadata(spdx_path):
+        """Patch SPDX metadata to credit OmniBOR tools.
+
+        1. Replaces ``documentNamespace`` with an
+           OmniBOR-based URI (preserving the UUID).
+        2. Adds bomtrace3, bomsh, and omnibor-analysis
+           to ``creationInfo.creators``.
+
+        Returns True on success, False on failure.
+        """
+        import json as _json
+        import re
+
+        path = Path(spdx_path)
+        if not path.exists():
+            return False
+
+        try:
+            doc = _json.loads(path.read_text())
+        except Exception:
+            return False
+
+        ci = doc.get("creationInfo")
+        if not ci or not isinstance(ci, dict):
+            return False
+
+        # --- documentNamespace ---
+        old_ns = doc.get("documentNamespace", "")
+        # Extract trailing UUID if present
+        uuid_match = re.search(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{12}",
+            old_ns,
+        )
+        uuid_part = (
+            uuid_match.group(0)
+            if uuid_match
+            else timestamp()
+        )
+        doc_name = doc.get("name", "unknown")
+        doc["documentNamespace"] = (
+            f"{SpdxGenerator.NAMESPACE_PREFIX}"
+            f"/{doc_name}-{uuid_part}"
+        )
+
+        # --- creators ---
+        creators = ci.get("creators", [])
+
+        bomsh_ver = SpdxGenerator._bomsh_version()
+        bt_ver = SpdxGenerator._bomtrace_version()
+
+        extra = [
+            f"Tool: bomtrace3-{bt_ver}",
+            f"Tool: bomsh-{bomsh_ver}",
+            "Tool: omnibor-analysis"
+            " (github.com/tedg-dev/omnibor-analysis)",
+        ]
+
+        for entry in extra:
+            if entry not in creators:
+                creators.append(entry)
+
+        ci["creators"] = creators
+        path.write_text(
+            _json.dumps(doc, indent=1) + "\n"
+        )
+        print(
+            "[OK] Patched SPDX namespace: "
+            + doc["documentNamespace"]
+        )
+        print(
+            "[OK] Patched SPDX creators: "
+            + ", ".join(extra)
+        )
+        return True
+
+    # --------------------------------------------------
+    # Main generate
+    # --------------------------------------------------
 
     def generate(
         self, repo_name, paths_cfg, omnibor_cfg
@@ -323,6 +484,9 @@ class SpdxGenerator:
                 "[WARN] SPDX generation may have "
                 "failed — check output"
             )
+        else:
+            self.patch_spdx_metadata(str(spdx_file))
+
         return str(spdx_file)
 
 
@@ -564,7 +728,8 @@ class SyftGenerator:
 
 class BinaryCollector:
     """Copies output binaries from the build tree into
-    output/binaries/<repo>/ for downstream analysis.
+    output/binaries/<repo>/<timestamp>/ so each run is
+    preserved in a datetime-stamped folder.
 
     Uses the ``output_binaries`` list from config.yaml,
     which contains paths relative to the repo root
@@ -573,7 +738,7 @@ class BinaryCollector:
 
     @staticmethod
     def collect(repo_name, repo_cfg, paths_cfg):
-        """Copy each listed binary to the output dir.
+        """Copy each listed binary to a timestamped dir.
 
         Returns a list of (src, dst) tuples for binaries
         that were successfully copied.
@@ -591,9 +756,10 @@ class BinaryCollector:
         repo_dir = (
             Path(paths_cfg["repos_dir"]) / repo_name
         )
+        ts = timestamp()
         out_dir = (
             Path(paths_cfg["output_dir"])
-            / "binaries" / repo_name
+            / "binaries" / repo_name / ts
         )
         out_dir.mkdir(parents=True, exist_ok=True)
 
