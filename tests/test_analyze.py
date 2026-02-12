@@ -393,33 +393,124 @@ class TestBomtraceBuilder(unittest.TestCase):
 class TestSpdxGenerator(unittest.TestCase):
     """Tests for SpdxGenerator."""
 
-    def test_generate(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+    def _setup_repo(self, tmpdir):
+        """Create fake repo with binaries."""
+        repo_dir = (
+            Path(tmpdir) / "repos" / "curl"
+            / "src" / ".libs"
+        )
+        repo_dir.mkdir(parents=True)
+        (repo_dir / "curl").write_bytes(b"bin")
+        return {
+            "repos_dir": str(Path(tmpdir) / "repos"),
+            "output_dir": str(
+                Path(tmpdir) / "output"
+            ),
+        }
+
+    def test_generate_calls_bomsh_with_files(self):
+        with tempfile.TemporaryDirectory() as td:
             runner = MagicMock()
             runner.run.return_value = 0
             gen = SpdxGenerator(runner)
-            paths = {"output_dir": tmpdir}
+            paths = self._setup_repo(td)
+            repo_cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
             omnibor = {
                 "sbom_script": "/usr/bin/sbom",
             }
 
             with patch("builtins.print"):
-                result = gen.generate(
-                    "curl", paths, omnibor
+                gen.generate(
+                    "curl", repo_cfg,
+                    paths, omnibor,
                 )
+            cmd = runner.run.call_args[0][0]
+            self.assertIn("-F ", cmd)
+            self.assertIn("-s spdx-json", cmd)
+            self.assertIn("src/.libs/curl", cmd)
+
+    def test_generate_renames_output(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = MagicMock()
+            runner.run.return_value = 0
+            gen = SpdxGenerator(runner)
+            paths = self._setup_repo(td)
+            repo_cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
+            omnibor = {
+                "sbom_script": "/usr/bin/sbom",
+            }
+
+            # Simulate bomsh_sbom.py output
+            spdx_dir = (
+                Path(td) / "output" / "spdx" / "curl"
+            )
+            spdx_dir.mkdir(parents=True)
+            (
+                spdx_dir
+                / "omnibor.curl.syft.spdx-json"
+            ).write_text('{"creationInfo":{}}')
+
+            with patch("builtins.print"), \
+                    patch.object(
+                        SpdxGenerator,
+                        "patch_spdx_metadata",
+                    ):
+                result = gen.generate(
+                    "curl", repo_cfg,
+                    paths, omnibor,
+                )
+            self.assertIsNotNone(result)
             self.assertIn("curl_omnibor_", result)
             self.assertIn(".spdx.json", result)
-            runner.run.assert_called_once()
+            self.assertTrue(Path(result).exists())
+
+    def test_generate_no_binaries_returns_none(self):
+        with tempfile.TemporaryDirectory() as td:
+            runner = MagicMock()
+            gen = SpdxGenerator(runner)
+            paths = {
+                "repos_dir": str(
+                    Path(td) / "repos"
+                ),
+                "output_dir": str(
+                    Path(td) / "output"
+                ),
+            }
+            repo_cfg = {
+                "output_binaries": [
+                    "nonexistent/bin"
+                ],
+            }
+            omnibor = {"sbom_script": "x"}
+
+            with patch("builtins.print"):
+                result = gen.generate(
+                    "curl", repo_cfg,
+                    paths, omnibor,
+                )
+            self.assertIsNone(result)
+            runner.run.assert_not_called()
 
     def test_generate_warns_on_failure(self):
-        with tempfile.TemporaryDirectory() as tmpdir:
+        with tempfile.TemporaryDirectory() as td:
             runner = MagicMock()
             runner.run.return_value = 1
             gen = SpdxGenerator(runner)
-            paths = {"output_dir": tmpdir}
-            omnibor = {
-                "sbom_script": "x",
+            paths = self._setup_repo(td)
+            repo_cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
             }
+            omnibor = {"sbom_script": "x"}
 
             printed = []
             with patch(
@@ -430,7 +521,10 @@ class TestSpdxGenerator(unittest.TestCase):
                     )
                 ),
             ):
-                gen.generate("curl", paths, omnibor)
+                gen.generate(
+                    "curl", repo_cfg,
+                    paths, omnibor,
+                )
             output = "\n".join(printed)
             self.assertIn("WARN", output)
 
@@ -636,13 +730,43 @@ class TestSpdxGeneratorMetadata(unittest.TestCase):
 
     def test_generate_calls_patch_on_success(self):
         with tempfile.TemporaryDirectory() as td:
-            runner = MagicMock()
-            runner.run.return_value = 0
-            gen = SpdxGenerator(runner)
-            paths = {"output_dir": td}
+            # Set up repo with binary
+            repo_dir = (
+                Path(td) / "repos" / "curl"
+                / "src" / ".libs"
+            )
+            repo_dir.mkdir(parents=True)
+            (repo_dir / "curl").write_bytes(b"bin")
+            paths = {
+                "repos_dir": str(
+                    Path(td) / "repos"
+                ),
+                "output_dir": str(
+                    Path(td) / "output"
+                ),
+            }
+            repo_cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
             omnibor = {
                 "sbom_script": "/usr/bin/sbom",
             }
+            # Simulate bomsh output
+            spdx_dir = (
+                Path(td) / "output"
+                / "spdx" / "curl"
+            )
+            spdx_dir.mkdir(parents=True)
+            (
+                spdx_dir
+                / "omnibor.curl.syft.spdx-json"
+            ).write_text('{"creationInfo":{}}')
+
+            runner = MagicMock()
+            runner.run.return_value = 0
+            gen = SpdxGenerator(runner)
             with patch.object(
                 SpdxGenerator,
                 "patch_spdx_metadata",
@@ -650,27 +774,51 @@ class TestSpdxGeneratorMetadata(unittest.TestCase):
                 "builtins.print"
             ):
                 result = gen.generate(
-                    "curl", paths, omnibor
+                    "curl", repo_cfg,
+                    paths, omnibor,
                 )
             mock_patch.assert_called_once_with(
                 result
             )
 
-    def test_generate_skips_patch_on_failure(self):
+    def test_generate_no_patch_when_no_output(self):
         with tempfile.TemporaryDirectory() as td:
+            repo_dir = (
+                Path(td) / "repos" / "curl"
+                / "src" / ".libs"
+            )
+            repo_dir.mkdir(parents=True)
+            (repo_dir / "curl").write_bytes(b"bin")
+            paths = {
+                "repos_dir": str(
+                    Path(td) / "repos"
+                ),
+                "output_dir": str(
+                    Path(td) / "output"
+                ),
+            }
+            repo_cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
+            omnibor = {"sbom_script": "x"}
             runner = MagicMock()
             runner.run.return_value = 1
             gen = SpdxGenerator(runner)
-            paths = {"output_dir": td}
-            omnibor = {"sbom_script": "x"}
             with patch.object(
                 SpdxGenerator,
                 "patch_spdx_metadata",
             ) as mock_patch, patch(
                 "builtins.print"
             ):
-                gen.generate("curl", paths, omnibor)
+                result = gen.generate(
+                    "curl", repo_cfg,
+                    paths, omnibor,
+                )
+            # No bomsh output file, so no patch
             mock_patch.assert_not_called()
+            self.assertIsNone(result)
 
 
 # ============================================================
