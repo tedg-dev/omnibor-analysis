@@ -22,7 +22,28 @@ PR-first workflow, no direct commits to main).
 
 **Do not proceed to any task until this step is complete.**
 
-## 1. Verify SSH access to DigitalOcean build droplet
+## 1. Verify Python virtual environment
+
+All local development uses `.venv/`. Verify it exists and has dependencies:
+
+```bash
+.venv/bin/python3 --version && .venv/bin/pip check 2>&1 | tail -3
+```
+
+If missing, create it:
+```bash
+python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -r requirements.txt
+```
+
+## 2. Verify system CLI tools
+
+```bash
+which gh doctl rsync ssh 2>&1
+```
+
+If `doctl` is missing: `brew install doctl && doctl auth init`
+
+## 3. Verify SSH access to DigitalOcean build droplet
 
 All bomtrace3 instrumented builds run on a remote DigitalOcean droplet
 (native x86_64 Linux). Local Docker is NOT needed.
@@ -36,25 +57,25 @@ DigitalOcean dashboard (cloud.digitalocean.com → Droplets → omnibor-build �
 
 SSH config is in `~/.ssh/config` under host `omnibor-build` (IP: 137.184.178.186).
 
-## 2. Verify key project files
+## 4. Verify key project files
 
 ```bash
 ls -la app/config.yaml app/analyze.py app/compare.py docker/Dockerfile docker/docker-compose.yml
 ```
 
-## 3. Check which repos are cloned (on droplet)
+## 5. Check which repos are cloned (on droplet)
 
 ```bash
 ssh omnibor-build "ls -d /root/omnibor-analysis/repos/*/ 2>/dev/null || echo 'No repos cloned yet'"
 ```
 
-## 4. Check for existing output artifacts (on droplet)
+## 6. Check for existing output artifacts (on droplet)
 
 ```bash
 ssh omnibor-build "find /root/omnibor-analysis/output/ -name '*.spdx.json' -o -name '*.sha1' 2>/dev/null | head -20 || echo 'No output artifacts yet'"
 ```
 
-## 5. Check for existing docs/reports (local)
+## 7. Check for existing docs/reports (local)
 
 ```bash
 find docs/ -name "*.md" -not -name ".gitkeep" 2>/dev/null | sort | tail -10 || echo "No reports yet"
