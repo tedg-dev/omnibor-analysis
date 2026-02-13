@@ -1,0 +1,168 @@
+"""Collect dynamic library dependencies from a binary.
+
+Runs inside the build container. Uses ldd and readelf to identify
+all dynamically linked libraries, distinguishes direct (NEEDED)
+from transitive, and resolves each to its dpkg package with
+full metadata.
+
+Outputs dynamic_libs.json alongside the treedb.
+"""
+import json
+import os
+import re
+import subprocess
+import sys
+
+
+def main(binary_path, out_dir):
+    # Get ldd output
+    ldd_out = subprocess.check_output(
+        ["ldd", binary_path], text=True
+    )
+
+    # Get NEEDED (direct deps)
+    readelf_out = subprocess.check_output(
+        ["readelf", "-d", binary_path], text=True
+    )
+    needed = set()
+    for line in readelf_out.splitlines():
+        m = re.search(r"NEEDED.*\[(.+)\]", line)
+        if m:
+            needed.add(m.group(1))
+
+    print(f"Direct NEEDED: {sorted(needed)}")
+
+    # Parse ldd output
+    libs = {}
+    for line in ldd_out.strip().splitlines():
+        line = line.strip()
+        m = re.match(r"(\S+)\s+=>\s+(\S+)\s+\(", line)
+        if m:
+            soname = m.group(1)
+            path = m.group(2)
+            is_direct = soname in needed
+            libs[soname] = {
+                "path": path, "direct": is_direct,
+            }
+        elif "ld-linux" in line:
+            m2 = re.match(r"(\S+)\s+\(", line)
+            if m2:
+                libs["ld-linux"] = {
+                    "path": m2.group(1),
+                    "direct": False,
+                }
+
+    direct_count = sum(
+        1 for v in libs.values() if v["direct"]
+    )
+    trans_count = len(libs) - direct_count
+    print(
+        f"Total: {len(libs)} "
+        f"(direct: {direct_count}, "
+        f"transitive: {trans_count})"
+    )
+
+    # Resolve each to dpkg package
+    fields = [
+        "Package", "Version", "Source",
+        "Maintainer", "Homepage", "Architecture",
+    ]
+    fmt = "|".join(
+        ["${" + f + "}" for f in fields]
+    )
+
+    results = {}
+    for soname, info in sorted(libs.items()):
+        real_path = os.path.realpath(info["path"])
+        pkg = None
+        # Try real path first, then original path
+        for try_path in [real_path, info["path"]]:
+            try:
+                dpkg_out = subprocess.check_output(
+                    ["dpkg", "-S", try_path],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                ).strip()
+                pkg = (
+                    dpkg_out.split(":")[0]
+                    .split(",")[0].strip()
+                )
+                if pkg:
+                    break
+            except Exception:
+                continue
+
+        meta = {}
+        if pkg:
+            try:
+                out = subprocess.check_output(
+                    ["dpkg-query", "-W", "-f", fmt, pkg],
+                    text=True,
+                    stderr=subprocess.DEVNULL,
+                )
+                parts = out.split("|")
+                for i, f in enumerate(fields):
+                    if i < len(parts) and parts[i]:
+                        meta[f] = parts[i]
+            except Exception:
+                pass
+
+        source = meta.get("Source", pkg or soname)
+        results[soname] = {
+            "path": info["path"],
+            "real_path": real_path,
+            "direct": info["direct"],
+            "dpkg_package": pkg,
+            "source": source,
+            "metadata": meta,
+        }
+        tag = "DIRECT" if info["direct"] else "transitive"
+        ver = meta.get("Version", "?")
+        print(f"  {soname:40s} {tag:12s} {source} ({ver})")
+
+    # Also analyze libcurl.so NEEDED
+    libcurl_needed = []
+    libcurl_path = os.path.join(
+        os.path.dirname(os.path.dirname(binary_path)),
+        "lib", ".libs", "libcurl.so",
+    )
+    if os.path.exists(libcurl_path):
+        try:
+            re_out = subprocess.check_output(
+                ["readelf", "-d", libcurl_path],
+                text=True,
+            )
+            for line in re_out.splitlines():
+                m = re.search(
+                    r"NEEDED.*\[(.+)\]", line
+                )
+                if m:
+                    libcurl_needed.append(m.group(1))
+            print(
+                f"\nlibcurl.so NEEDED: {libcurl_needed}"
+            )
+        except Exception as e:
+            print(f"Could not analyze libcurl.so: {e}")
+
+    output = {
+        "binary": binary_path,
+        "direct_needed": sorted(needed),
+        "dynamic_libs": results,
+        "libcurl_needed": sorted(libcurl_needed),
+    }
+
+    os.makedirs(out_dir, exist_ok=True)
+    out_path = os.path.join(out_dir, "dynamic_libs.json")
+    with open(out_path, "w") as f:
+        json.dump(output, f, indent=2)
+    print(f"\nWrote: {out_path}")
+
+
+if __name__ == "__main__":
+    binary = sys.argv[1] if len(sys.argv) > 1 else (
+        "/workspace/repos/curl/src/.libs/curl"
+    )
+    out = sys.argv[2] if len(sys.argv) > 2 else (
+        "/workspace/output/omnibor/curl/metadata"
+    )
+    main(binary, out)

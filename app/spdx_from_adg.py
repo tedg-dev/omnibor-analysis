@@ -176,14 +176,15 @@ class ComponentResolver:
     """Resolve artifacts to named software components.
 
     Uses component_metadata.json (from collect_metadata.py)
-    to map file paths to dpkg packages, then deduplicates
-    by upstream source package name.
+    and dynamic_libs.json (from collect_dynamic_libs.py)
+    to identify runtime dependencies with full metadata.
     """
 
     def __init__(self, metadata_path):
         self.metadata = json.loads(
             Path(metadata_path).read_text()
         )
+        self._dynamic_libs = None
 
     @property
     def distro(self):
@@ -214,39 +215,54 @@ class ComponentResolver:
             "curl_version", "unknown"
         )
 
-    def resolve_system_components(self, artifacts):
-        """Group system artifacts into components.
+    def load_dynamic_libs(self, path):
+        """Load dynamic_libs.json."""
+        self._dynamic_libs = json.loads(
+            Path(path).read_text()
+        )
 
-        Returns a list of component dicts, each with:
-          name, version, supplier, homepage, dpkg_package,
-          purl, cpe23, architecture, files (list of paths).
+    def resolve_dynamic_components(self):
+        """Resolve dynamic libraries to components.
+
+        Groups libraries by upstream source package.
+        Each component has:
+          name, version, supplier, homepage,
+          dpkg_packages, architecture, purl, cpe23,
+          sonames, direct (bool).
         """
-        file_to_pkg = self.metadata.get(
-            "file_to_pkg", {}
-        )
-        pkg_meta = self.metadata.get(
-            "pkg_metadata", {}
+        if not self._dynamic_libs:
+            return []
+
+        libs = self._dynamic_libs.get(
+            "dynamic_libs", {}
         )
 
-        # Group files by upstream source package
+        # Group by upstream source
         source_groups = {}
-        for art in artifacts:
-            fp = art["file_path"]
-            dpkg_pkg = file_to_pkg.get(fp)
-            if not dpkg_pkg:
+        for soname, info in libs.items():
+            meta = info.get("metadata", {})
+            source = info.get("source", soname)
+            if not meta.get("Version"):
                 continue
-            meta = pkg_meta.get(dpkg_pkg, {})
-            source = meta.get("Source", dpkg_pkg)
             if source not in source_groups:
                 source_groups[source] = {
-                    "dpkg_packages": set(),
                     "meta": meta,
-                    "files": [],
+                    "sonames": [],
+                    "direct": False,
+                    "dpkg_packages": set(),
                 }
             source_groups[source][
-                "dpkg_packages"
-            ].add(dpkg_pkg)
-            source_groups[source]["files"].append(fp)
+                "sonames"
+            ].append(soname)
+            if info.get("direct"):
+                source_groups[source][
+                    "direct"
+                ] = True
+            dpkg = info.get("dpkg_package")
+            if dpkg:
+                source_groups[source][
+                    "dpkg_packages"
+                ].add(dpkg)
 
         components = []
         for source, group in sorted(
@@ -254,13 +270,16 @@ class ComponentResolver:
         ):
             meta = group["meta"]
             version = meta.get("Version", "unknown")
-            arch = meta.get("Architecture", "amd64")
-            # Use first dpkg package for PURL
-            dpkg_pkg = sorted(
+            arch = meta.get(
+                "Architecture", "amd64"
+            )
+            dpkg_pkgs = sorted(
                 group["dpkg_packages"]
-            )[0]
-
-            # Strip epoch and dfsg suffix for CPE
+            )
+            dpkg_pkg = (
+                dpkg_pkgs[0] if dpkg_pkgs
+                else source
+            )
             cpe_ver = self._clean_version(version)
 
             comp = {
@@ -272,9 +291,7 @@ class ComponentResolver:
                 "homepage": meta.get(
                     "Homepage", "NOASSERTION"
                 ),
-                "dpkg_packages": sorted(
-                    group["dpkg_packages"]
-                ),
+                "dpkg_packages": dpkg_pkgs,
                 "architecture": arch,
                 "purl": self._make_purl(
                     dpkg_pkg, version, arch
@@ -282,9 +299,10 @@ class ComponentResolver:
                 "cpe23": self._make_cpe(
                     source, cpe_ver
                 ),
-                "files": sorted(
-                    set(group["files"])
+                "sonames": sorted(
+                    group["sonames"]
                 ),
+                "direct": group["direct"],
             }
             components.append(comp)
 
@@ -334,9 +352,10 @@ class SpdxEmitter:
     Generates a complete SPDX document with:
       - Document-level metadata (namespace, creators)
       - Root package for the target binary
-      - One package per upstream component
+      - One package per dynamically linked library
+        (primaryPackagePurpose: LIBRARY)
       - ExternalRefs: PURL, CPE, OmniBOR gitoid
-      - Relationships: DEPENDS_ON, BUILD_TOOL_OF
+      - Relationships: DYNAMIC_LINK, BUILD_TOOL_OF
       - File entries for project source files
     """
 
@@ -467,12 +486,21 @@ class SpdxEmitter:
             "relatedSpdxElement": root_id,
         })
 
-        # --- Component packages ---
+        # --- Dynamic library packages ---
         for comp in components:
             safe_name = self._sanitize_spdx_id(
                 comp["name"]
             )
             pkg_id = self._next_spdx_id(safe_name)
+
+            linkage = (
+                "direct" if comp.get("direct")
+                else "transitive"
+            )
+            sonames = comp.get("sonames", [])
+            dpkg_pkgs = comp.get(
+                "dpkg_packages", []
+            )
 
             pkg = {
                 "SPDXID": pkg_id,
@@ -481,13 +509,15 @@ class SpdxEmitter:
                 "supplier": (
                     f"Organization: "
                     f"{comp['supplier']}"
-                    if comp["supplier"]
+                    if comp.get("supplier")
+                    and comp["supplier"]
                     != "NOASSERTION"
                     else "NOASSERTION"
                 ),
                 "downloadLocation": (
                     comp["homepage"]
-                    if comp["homepage"]
+                    if comp.get("homepage")
+                    and comp["homepage"]
                     != "NOASSERTION"
                     else "NOASSERTION"
                 ),
@@ -495,35 +525,44 @@ class SpdxEmitter:
                     "homepage", "NOASSERTION"
                 ),
                 "filesAnalyzed": False,
+                "primaryPackagePurpose": "LIBRARY",
                 "externalRefs": [],
                 "comment": (
+                    f"Dynamically linked ({linkage}). "
+                    f"sonames: {', '.join(sonames)}. "
                     f"dpkg: "
-                    f"{', '.join(comp['dpkg_packages'])}"
-                    f" ({comp['architecture']})"
+                    f"{', '.join(dpkg_pkgs)}"
+                    f" ({comp.get('architecture', 'amd64')})"
                 ),
             }
 
             # PURL
-            pkg["externalRefs"].append({
-                "referenceCategory":
-                    "PACKAGE-MANAGER",
-                "referenceType": "purl",
-                "referenceLocator": comp["purl"],
-            })
+            if comp.get("purl"):
+                pkg["externalRefs"].append({
+                    "referenceCategory":
+                        "PACKAGE-MANAGER",
+                    "referenceType": "purl",
+                    "referenceLocator":
+                        comp["purl"],
+                })
 
             # CPE
-            pkg["externalRefs"].append({
-                "referenceCategory": "SECURITY",
-                "referenceType": "cpe23Type",
-                "referenceLocator": comp["cpe23"],
-            })
+            if comp.get("cpe23"):
+                pkg["externalRefs"].append({
+                    "referenceCategory":
+                        "SECURITY",
+                    "referenceType": "cpe23Type",
+                    "referenceLocator":
+                        comp["cpe23"],
+                })
 
             doc["packages"].append(pkg)
 
-            # DEPENDS_ON from root
+            # DYNAMIC_LINK from root
             doc["relationships"].append({
                 "spdxElementId": root_id,
-                "relationshipType": "DEPENDS_ON",
+                "relationshipType":
+                    "DYNAMIC_LINK",
                 "relatedSpdxElement": pkg_id,
             })
 
@@ -641,7 +680,7 @@ class AdgSpdxGenerator:
         Returns the output path on success, None on
         failure.
         """
-        # Parse ADG
+        # Parse ADG for OmniBOR data
         parser = AdgParser(
             self.bom_dir, self.repos_dir
         )
@@ -652,13 +691,9 @@ class AdgSpdxGenerator:
         )
 
         print(
-            f"[ADG] System libs: "
-            f"{len(classified['system_lib'])}, "
-            f"Headers: "
-            f"{len(classified['system_header'])}, "
-            f"Source: "
+            f"[ADG] Source files: "
             f"{len(classified['project_source'])}, "
-            f"Intermediates: "
+            f"Build intermediates: "
             f"{len(classified['build_intermediate'])}"
         )
 
@@ -677,20 +712,35 @@ class AdgSpdxGenerator:
 
         resolver = ComponentResolver(str(meta_path))
 
-        # Resolve system artifacts to components
-        all_system = (
-            classified["system_lib"]
-            + classified["system_header"]
-            + classified["crt_object"]
+        # Load dynamic library data
+        dynlib_path = (
+            self.bom_dir / "metadata"
+            / "dynamic_libs.json"
+        )
+        if not dynlib_path.exists():
+            print(
+                "[ERROR] dynamic_libs.json "
+                "not found. Run "
+                "collect_dynamic_libs.py first."
+            )
+            return None
+
+        resolver.load_dynamic_libs(
+            str(dynlib_path)
         )
         components = (
-            resolver.resolve_system_components(
-                all_system
-            )
+            resolver.resolve_dynamic_components()
         )
+
+        direct = sum(
+            1 for c in components if c["direct"]
+        )
+        trans = len(components) - direct
         print(
-            f"[ADG] Resolved {len(components)} "
-            f"upstream components"
+            f"[ADG] Dynamic libraries: "
+            f"{len(components)} components "
+            f"({direct} direct, "
+            f"{trans} transitive)"
         )
 
         # Emit SPDX

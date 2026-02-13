@@ -217,52 +217,122 @@ class TestComponentResolver(unittest.TestCase):
             "distro": "Ubuntu 22.04.5 LTS",
             "gcc_version": "gcc (Ubuntu 11.4.0) 11.4.0",
             "curl_version": "8.19.0-DEV",
-            "pkg_metadata": {
-                "libssl3": {
-                    "Package": "libssl3",
-                    "Version": "3.0.2-0ubuntu1.21",
-                    "Source": "openssl",
-                    "Maintainer": "Ubuntu Developers",
-                    "Homepage": "https://www.openssl.org/",
-                    "Architecture": "amd64",
-                },
-                "zlib1g-dev": {
-                    "Package": "zlib1g-dev",
-                    "Version": "1:1.2.11.dfsg-2ubuntu9.2",
-                    "Source": "zlib",
-                    "Maintainer": "Ubuntu Developers",
-                    "Homepage": "http://zlib.net/",
-                    "Architecture": "amd64",
-                },
-            },
-            "file_to_pkg": {
-                "/usr/lib/libssl.so": "libssl3",
-                "/usr/lib/libcrypto.so": "libssl3",
-                "/usr/include/zlib.h": "zlib1g-dev",
-            },
+            "pkg_metadata": {},
+            "file_to_pkg": {},
             "unresolved_files": [],
         }
 
-    def test_resolve_components(self):
+    def _base_dynlibs(self):
+        return {
+            "binary": "/repos/curl/src/.libs/curl",
+            "direct_needed": ["libssl.so.3"],
+            "dynamic_libs": {
+                "libssl.so.3": {
+                    "path": "/lib/libssl.so.3",
+                    "real_path": "/lib/libssl.so.3",
+                    "direct": True,
+                    "dpkg_package": "libssl3",
+                    "source": "openssl",
+                    "metadata": {
+                        "Package": "libssl3",
+                        "Version": "3.0.2-0ubuntu1.21",
+                        "Source": "openssl",
+                        "Maintainer": "Ubuntu Developers",
+                        "Homepage": "https://www.openssl.org/",
+                        "Architecture": "amd64",
+                    },
+                },
+                "libcrypto.so.3": {
+                    "path": "/lib/libcrypto.so.3",
+                    "real_path": "/lib/libcrypto.so.3",
+                    "direct": False,
+                    "dpkg_package": "libssl3",
+                    "source": "openssl",
+                    "metadata": {
+                        "Package": "libssl3",
+                        "Version": "3.0.2-0ubuntu1.21",
+                        "Source": "openssl",
+                        "Maintainer": "Ubuntu Developers",
+                        "Homepage": "https://www.openssl.org/",
+                        "Architecture": "amd64",
+                    },
+                },
+                "libz.so.1": {
+                    "path": "/lib/libz.so.1",
+                    "real_path": "/lib/libz.so.1",
+                    "direct": True,
+                    "dpkg_package": "zlib1g",
+                    "source": "zlib",
+                    "metadata": {
+                        "Package": "zlib1g",
+                        "Version": "1:1.2.11.dfsg-2ubuntu9.2",
+                        "Source": "zlib",
+                        "Maintainer": "Ubuntu Developers",
+                        "Homepage": "http://zlib.net/",
+                        "Architecture": "amd64",
+                    },
+                },
+            },
+            "libcurl_needed": [],
+        }
+
+    def test_resolve_dynamic_components(self):
         with tempfile.TemporaryDirectory() as td:
             meta = self._base_metadata()
             path = self._write_metadata(td, meta)
             resolver = ComponentResolver(path)
 
-            artifacts = [
-                {"sha1": "a1", "file_path": "/usr/lib/libssl.so"},
-                {"sha1": "a2", "file_path": "/usr/lib/libcrypto.so"},
-                {"sha1": "a3", "file_path": "/usr/include/zlib.h"},
-            ]
+            dynlib_path = Path(td) / "dynamic_libs.json"
+            dynlib_path.write_text(
+                json.dumps(self._base_dynlibs())
+            )
+            resolver.load_dynamic_libs(str(dynlib_path))
             components = (
-                resolver.resolve_system_components(
-                    artifacts
-                )
+                resolver.resolve_dynamic_components()
             )
             self.assertEqual(len(components), 2)
             names = [c["name"] for c in components]
             self.assertIn("openssl", names)
             self.assertIn("zlib", names)
+
+    def test_direct_flag(self):
+        with tempfile.TemporaryDirectory() as td:
+            meta = self._base_metadata()
+            path = self._write_metadata(td, meta)
+            resolver = ComponentResolver(path)
+
+            dynlib_path = Path(td) / "dynamic_libs.json"
+            dynlib_path.write_text(
+                json.dumps(self._base_dynlibs())
+            )
+            resolver.load_dynamic_libs(str(dynlib_path))
+            components = (
+                resolver.resolve_dynamic_components()
+            )
+            ssl = [c for c in components if c["name"] == "openssl"][0]
+            zlib = [c for c in components if c["name"] == "zlib"][0]
+            # openssl has one direct soname
+            self.assertTrue(ssl["direct"])
+            self.assertTrue(zlib["direct"])
+
+    def test_sonames_grouped(self):
+        with tempfile.TemporaryDirectory() as td:
+            meta = self._base_metadata()
+            path = self._write_metadata(td, meta)
+            resolver = ComponentResolver(path)
+
+            dynlib_path = Path(td) / "dynamic_libs.json"
+            dynlib_path.write_text(
+                json.dumps(self._base_dynlibs())
+            )
+            resolver.load_dynamic_libs(str(dynlib_path))
+            components = (
+                resolver.resolve_dynamic_components()
+            )
+            ssl = [c for c in components if c["name"] == "openssl"][0]
+            self.assertEqual(len(ssl["sonames"]), 2)
+            self.assertIn("libssl.so.3", ssl["sonames"])
+            self.assertIn("libcrypto.so.3", ssl["sonames"])
 
     def test_purl_format(self):
         with tempfile.TemporaryDirectory() as td:
@@ -270,18 +340,18 @@ class TestComponentResolver(unittest.TestCase):
             path = self._write_metadata(td, meta)
             resolver = ComponentResolver(path)
 
-            artifacts = [
-                {"sha1": "a1", "file_path": "/usr/lib/libssl.so"},
-            ]
-            components = (
-                resolver.resolve_system_components(
-                    artifacts
-                )
+            dynlib_path = Path(td) / "dynamic_libs.json"
+            dynlib_path.write_text(
+                json.dumps(self._base_dynlibs())
             )
-            purl = components[0]["purl"]
-            self.assertIn("pkg:deb/ubuntu/", purl)
-            self.assertIn("distro=ubuntu-22.04", purl)
-            self.assertIn("arch=amd64", purl)
+            resolver.load_dynamic_libs(str(dynlib_path))
+            components = (
+                resolver.resolve_dynamic_components()
+            )
+            ssl = [c for c in components if c["name"] == "openssl"][0]
+            self.assertIn("pkg:deb/ubuntu/", ssl["purl"])
+            self.assertIn("distro=ubuntu-22.04", ssl["purl"])
+            self.assertIn("arch=amd64", ssl["purl"])
 
     def test_cpe_format(self):
         with tempfile.TemporaryDirectory() as td:
@@ -289,20 +359,20 @@ class TestComponentResolver(unittest.TestCase):
             path = self._write_metadata(td, meta)
             resolver = ComponentResolver(path)
 
-            artifacts = [
-                {"sha1": "a1", "file_path": "/usr/lib/libssl.so"},
-            ]
+            dynlib_path = Path(td) / "dynamic_libs.json"
+            dynlib_path.write_text(
+                json.dumps(self._base_dynlibs())
+            )
+            resolver.load_dynamic_libs(str(dynlib_path))
             components = (
-                resolver.resolve_system_components(
-                    artifacts
-                )
+                resolver.resolve_dynamic_components()
             )
-            cpe = components[0]["cpe23"]
+            ssl = [c for c in components if c["name"] == "openssl"][0]
             self.assertTrue(
-                cpe.startswith("cpe:2.3:a:")
+                ssl["cpe23"].startswith("cpe:2.3:a:")
             )
-            self.assertIn("openssl", cpe)
-            self.assertIn("3.0.2", cpe)
+            self.assertIn("openssl", ssl["cpe23"])
+            self.assertIn("3.0.2", ssl["cpe23"])
 
     def test_clean_version(self):
         with tempfile.TemporaryDirectory() as td:
@@ -340,19 +410,43 @@ class TestComponentResolver(unittest.TestCase):
                 "ubuntu-22.04",
             )
 
-    def test_unresolved_artifacts_skipped(self):
+    def test_no_dynamic_libs_loaded(self):
+        with tempfile.TemporaryDirectory() as td:
+            meta = self._base_metadata()
+            path = self._write_metadata(td, meta)
+            resolver = ComponentResolver(path)
+            # Don't load dynamic libs
+            components = (
+                resolver.resolve_dynamic_components()
+            )
+            self.assertEqual(len(components), 0)
+
+    def test_libs_without_version_skipped(self):
         with tempfile.TemporaryDirectory() as td:
             meta = self._base_metadata()
             path = self._write_metadata(td, meta)
             resolver = ComponentResolver(path)
 
-            artifacts = [
-                {"sha1": "x", "file_path": "/unknown/path"},
-            ]
+            dynlibs = {
+                "binary": "/curl",
+                "direct_needed": [],
+                "dynamic_libs": {
+                    "ld-linux": {
+                        "path": "/lib64/ld-linux.so.2",
+                        "real_path": "/lib64/ld-linux.so.2",
+                        "direct": False,
+                        "dpkg_package": None,
+                        "source": "ld-linux",
+                        "metadata": {},
+                    },
+                },
+                "libcurl_needed": [],
+            }
+            dynlib_path = Path(td) / "dynamic_libs.json"
+            dynlib_path.write_text(json.dumps(dynlibs))
+            resolver.load_dynamic_libs(str(dynlib_path))
             components = (
-                resolver.resolve_system_components(
-                    artifacts
-                )
+                resolver.resolve_dynamic_components()
             )
             self.assertEqual(len(components), 0)
 
@@ -411,7 +505,8 @@ class TestSpdxEmitter(unittest.TestCase):
             "architecture": "amd64",
             "purl": "pkg:deb/ubuntu/libssl3@3.0.2",
             "cpe23": "cpe:2.3:a:openssl:openssl:3.0.2:*:*:*:*:*:*:*",
-            "files": ["/usr/lib/libssl.so"],
+            "sonames": ["libssl.so.3", "libcrypto.so.3"],
+            "direct": True,
         }]
         doc = emitter.emit(
             components=components,
@@ -423,12 +518,31 @@ class TestSpdxEmitter(unittest.TestCase):
         self.assertEqual(len(doc["packages"]), 3)
         ssl_pkg = doc["packages"][1]
         self.assertEqual(ssl_pkg["name"], "openssl")
+        # Labeled as LIBRARY
+        self.assertEqual(
+            ssl_pkg["primaryPackagePurpose"],
+            "LIBRARY",
+        )
+        # Comment mentions dynamically linked
+        self.assertIn(
+            "Dynamically linked (direct)",
+            ssl_pkg["comment"],
+        )
+        self.assertIn(
+            "libssl.so.3", ssl_pkg["comment"]
+        )
         ref_types = [
             r["referenceType"]
             for r in ssl_pkg["externalRefs"]
         ]
         self.assertIn("purl", ref_types)
         self.assertIn("cpe23Type", ref_types)
+        # DYNAMIC_LINK relationship
+        rels = [
+            r for r in doc["relationships"]
+            if r["relationshipType"] == "DYNAMIC_LINK"
+        ]
+        self.assertEqual(len(rels), 1)
 
     def test_emit_with_omnibor_ref(self):
         sha = "a" * 40
@@ -548,9 +662,6 @@ class TestAdgSpdxGenerator(unittest.TestCase):
             sha: {
                 "file_path": "/repos/curl/src/main.c",
             },
-            "b" * 40: {
-                "file_path": "/usr/lib/libssl.so",
-            },
         }
         (meta / "bomsh_omnibor_treedb").write_text(
             json.dumps(treedb)
@@ -566,23 +677,38 @@ class TestAdgSpdxGenerator(unittest.TestCase):
             "distro": "Ubuntu 22.04",
             "gcc_version": "gcc 11.4.0",
             "curl_version": "8.19.0",
-            "pkg_metadata": {
-                "libssl3": {
-                    "Package": "libssl3",
-                    "Version": "3.0.2",
-                    "Source": "openssl",
-                    "Maintainer": "Ubuntu",
-                    "Homepage": "https://openssl.org",
-                    "Architecture": "amd64",
-                },
-            },
-            "file_to_pkg": {
-                "/usr/lib/libssl.so": "libssl3",
-            },
+            "pkg_metadata": {},
+            "file_to_pkg": {},
             "unresolved_files": [],
         }
         (bom / "metadata" / "component_metadata.json").write_text(
             json.dumps(comp_meta)
+        )
+
+        dynlibs = {
+            "binary": "/repos/curl/src/.libs/curl",
+            "direct_needed": ["libssl.so.3"],
+            "dynamic_libs": {
+                "libssl.so.3": {
+                    "path": "/lib/libssl.so.3",
+                    "real_path": "/lib/libssl.so.3",
+                    "direct": True,
+                    "dpkg_package": "libssl3",
+                    "source": "openssl",
+                    "metadata": {
+                        "Package": "libssl3",
+                        "Version": "3.0.2",
+                        "Source": "openssl",
+                        "Maintainer": "Ubuntu",
+                        "Homepage": "https://openssl.org",
+                        "Architecture": "amd64",
+                    },
+                },
+            },
+            "libcurl_needed": [],
+        }
+        (bom / "metadata" / "dynamic_libs.json").write_text(
+            json.dumps(dynlibs)
         )
 
         return str(bom)
@@ -679,6 +805,17 @@ class TestCli(unittest.TestCase):
                 bom / "metadata"
                 / "component_metadata.json"
             ).write_text(json.dumps(comp_meta))
+
+            dynlibs = {
+                "binary": "/repos/curl/src/.libs/curl",
+                "direct_needed": [],
+                "dynamic_libs": {},
+                "libcurl_needed": [],
+            }
+            (
+                bom / "metadata"
+                / "dynamic_libs.json"
+            ).write_text(json.dumps(dynlibs))
 
             out = str(
                 Path(td) / "out" / "curl.spdx.json"

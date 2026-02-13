@@ -4,6 +4,7 @@
 omit =
     app/apply_qemu_fallback.py
     app/collect_metadata.py
+    app/collect_dynamic_libs.py
     docker/patches/*
 
 [report]
