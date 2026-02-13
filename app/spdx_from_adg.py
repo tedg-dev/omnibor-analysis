@@ -368,6 +368,7 @@ class SpdxEmitter:
         distro, gcc_version,
         bomtrace_version="unknown",
         bomsh_version="unknown",
+        binary_name=None,
     ):
         self.repo_name = repo_name
         self.repo_version = repo_version
@@ -375,6 +376,9 @@ class SpdxEmitter:
         self.gcc_version = gcc_version
         self.bomtrace_version = bomtrace_version
         self.bomsh_version = bomsh_version
+        self.binary_name = (
+            binary_name or repo_name
+        )
         self._spdx_id_counter = 0
 
     def _next_spdx_id(self, prefix="Package"):
@@ -413,10 +417,10 @@ class SpdxEmitter:
             "spdxVersion": "SPDX-2.3",
             "dataLicense": "CC0-1.0",
             "SPDXID": "SPDXRef-DOCUMENT",
-            "name": self.repo_name,
+            "name": self.binary_name,
             "documentNamespace": (
                 f"{self.NAMESPACE_PREFIX}"
-                f"/{self.repo_name}-{doc_uuid}"
+                f"/{self.binary_name}-{doc_uuid}"
             ),
             "creationInfo": {
                 "created": now,
@@ -437,15 +441,23 @@ class SpdxEmitter:
         }
 
         # --- Root package: the target binary ---
+        is_shared_lib = (
+            self.binary_name.endswith(".so")
+            or ".so." in self.binary_name
+        )
+        root_purpose = (
+            "LIBRARY" if is_shared_lib
+            else "APPLICATION"
+        )
         root_id = "SPDXRef-Package-root"
         root_pkg = {
             "SPDXID": root_id,
-            "name": self.repo_name,
+            "name": self.binary_name,
             "versionInfo": self.repo_version,
             "supplier": "NOASSERTION",
             "downloadLocation": "NOASSERTION",
             "filesAnalyzed": True,
-            "primaryPackagePurpose": "APPLICATION",
+            "primaryPackagePurpose": root_purpose,
             "builtDate": now,
             "externalRefs": [],
             "checksums": [],
@@ -460,7 +472,7 @@ class SpdxEmitter:
             logfile_hashes.items()
         ):
             basename = Path(bin_path).name
-            if basename == self.repo_name:
+            if basename == self.binary_name:
                 omnibor_id = doc_mapping.get(sha1)
                 if omnibor_id:
                     root_pkg["externalRefs"].append({
@@ -657,10 +669,11 @@ class SpdxEmitter:
 # ============================================================
 
 class AdgSpdxGenerator:
-    """Facade: generate complete SPDX from ADG data.
+    """Facade: generate per-binary SPDX from ADG data.
 
     Orchestrates AdgParser, ComponentResolver, and
-    SpdxEmitter to produce a single SPDX 2.3 JSON file.
+    SpdxEmitter to produce one SPDX 2.3 JSON file per
+    binary (e.g. curl, libcurl.so).
     """
 
     def __init__(
@@ -674,12 +687,27 @@ class AdgSpdxGenerator:
         self.bomtrace_version = bomtrace_version
         self.bomsh_version = bomsh_version
 
-    def generate(self, output_path):
-        """Generate SPDX and write to output_path.
+    def generate(
+        self, output_path,
+        binary_name=None,
+        dynlib_dir=None,
+    ):
+        """Generate SPDX for a single binary.
+
+        Args:
+            output_path: where to write the SPDX JSON
+            binary_name: name of the binary
+                (e.g. "curl" or "libcurl.so");
+                defaults to repo_name
+            dynlib_dir: path to directory containing
+                dynamic_libs.json for this binary;
+                defaults to bom_dir/metadata
 
         Returns the output path on success, None on
         failure.
         """
+        bin_name = binary_name or self.repo_name
+
         # Parse ADG for OmniBOR data
         parser = AdgParser(
             self.bom_dir, self.repos_dir
@@ -691,7 +719,7 @@ class AdgSpdxGenerator:
         )
 
         print(
-            f"[ADG] Source files: "
+            f"[{bin_name}] Source files: "
             f"{len(classified['project_source'])}, "
             f"Build intermediates: "
             f"{len(classified['build_intermediate'])}"
@@ -713,15 +741,17 @@ class AdgSpdxGenerator:
         resolver = ComponentResolver(str(meta_path))
 
         # Load dynamic library data
-        dynlib_path = (
-            self.bom_dir / "metadata"
-            / "dynamic_libs.json"
+        dl_dir = Path(
+            dynlib_dir
+            if dynlib_dir
+            else self.bom_dir / "metadata"
         )
+        dynlib_path = dl_dir / "dynamic_libs.json"
         if not dynlib_path.exists():
             print(
-                "[ERROR] dynamic_libs.json "
-                "not found. Run "
-                "collect_dynamic_libs.py first."
+                f"[ERROR] {dynlib_path} not found. "
+                f"Run collect_dynamic_libs.py for "
+                f"{bin_name} first."
             )
             return None
 
@@ -737,7 +767,7 @@ class AdgSpdxGenerator:
         )
         trans = len(components) - direct
         print(
-            f"[ADG] Dynamic libraries: "
+            f"[{bin_name}] Dynamic libraries: "
             f"{len(components)} components "
             f"({direct} direct, "
             f"{trans} transitive)"
@@ -751,6 +781,7 @@ class AdgSpdxGenerator:
             gcc_version=resolver.gcc_version,
             bomtrace_version=self.bomtrace_version,
             bomsh_version=self.bomsh_version,
+            binary_name=bin_name,
         )
 
         doc = emitter.emit(
@@ -773,7 +804,7 @@ class AdgSpdxGenerator:
         file_count = len(doc["files"])
         rel_count = len(doc["relationships"])
         print(
-            f"[OK] ADG SPDX: {out.name} "
+            f"[OK] {bin_name} SPDX: {out.name} "
             f"({pkg_count} packages, "
             f"{file_count} files, "
             f"{rel_count} relationships)"
@@ -813,6 +844,20 @@ def main():
     ap.add_argument(
         "--bomsh-version", default="unknown",
     )
+    ap.add_argument(
+        "--binary-name", default=None,
+        help=(
+            "Binary name (e.g. curl, libcurl.so). "
+            "Defaults to --repo-name"
+        ),
+    )
+    ap.add_argument(
+        "--dynlib-dir", default=None,
+        help=(
+            "Directory containing "
+            "dynamic_libs.json for this binary"
+        ),
+    )
     args = ap.parse_args()
 
     gen = AdgSpdxGenerator(
@@ -822,7 +867,11 @@ def main():
         bomtrace_version=args.bomtrace_version,
         bomsh_version=args.bomsh_version,
     )
-    result = gen.generate(args.output)
+    result = gen.generate(
+        args.output,
+        binary_name=args.binary_name,
+        dynlib_dir=args.dynlib_dir,
+    )
     if result:
         print(f"Success: {result}")
     else:
