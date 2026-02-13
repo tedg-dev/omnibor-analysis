@@ -29,6 +29,7 @@ Classes:
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 import time
@@ -345,19 +346,32 @@ class SpdxGenerator:
 
     @staticmethod
     def _bomtrace_version():
-        """Return bomtrace3 version string."""
+        """Return bomtrace3 version string.
+
+        bomtrace3 has no --version flag, but the
+        strace version is embedded in the binary.
+        Extract it with ``strings | grep``.
+        """
+        import shutil
+
+        bt = shutil.which("bomtrace3")
+        if not bt:
+            return "unknown"
         try:
             out = subprocess.check_output(
-                ["bomtrace3", "--version"],
+                ["strings", bt],
                 stderr=subprocess.STDOUT,
                 text=True,
-            ).strip()
-            # "strace -- version 6.11" or similar
-            if "version" in out.lower():
-                return out.split()[-1]
-            return out
+            )
+            for line in out.splitlines():
+                line = line.strip()
+                if re.match(
+                    r"^\d+\.\d+(-\w+)?$", line
+                ):
+                    return line
         except Exception:
-            return "unknown"
+            pass
+        return "unknown"
 
     # --------------------------------------------------
     # Creator patching
@@ -380,7 +394,6 @@ class SpdxGenerator:
         Returns True on success, False on failure.
         """
         import json as _json
-        import re
 
         path = Path(spdx_path)
         if not path.exists():
@@ -499,7 +512,8 @@ class SpdxGenerator:
             f"-b {bom_dir} "
             f"-F {files_arg} "
             f"-O {spdx_dir} "
-            f"-s spdx-json",
+            f"-s spdx-json "
+            f"--force_insert",
             description=(
                 "Generating SPDX SBOM from "
                 f"{len(artifact_paths)} artifact(s)"
