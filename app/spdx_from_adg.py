@@ -396,6 +396,7 @@ class SpdxEmitter:
     def emit(
         self, components, project_files,
         doc_mapping, logfile_hashes,
+        direct_only=False,
     ):
         """Generate SPDX 2.3 JSON dict.
 
@@ -404,6 +405,10 @@ class SpdxEmitter:
             project_files: list of project source artifacts
             doc_mapping: sha1 -> omnibor_doc_id
             logfile_hashes: file_path -> build-time sha1
+            direct_only: if True, include only direct
+                dependencies (exclude transitive).
+                Use for two-tier SBOMs where transitive
+                deps belong to a downstream SBOM.
 
         Returns:
             dict: complete SPDX 2.3 JSON document
@@ -499,6 +504,12 @@ class SpdxEmitter:
         })
 
         # --- Dynamic library packages ---
+        if direct_only:
+            components = [
+                c for c in components
+                if c.get("direct")
+            ]
+
         for comp in components:
             safe_name = self._sanitize_spdx_id(
                 comp["name"]
@@ -691,6 +702,7 @@ class AdgSpdxGenerator:
         self, output_path,
         binary_name=None,
         dynlib_dir=None,
+        direct_only=False,
     ):
         """Generate SPDX for a single binary.
 
@@ -702,6 +714,9 @@ class AdgSpdxGenerator:
             dynlib_dir: path to directory containing
                 dynamic_libs.json for this binary;
                 defaults to bom_dir/metadata
+            direct_only: if True, include only direct
+                dependencies. Use when transitive deps
+                belong to a downstream binary's SBOM.
 
         Returns the output path on success, None on
         failure.
@@ -791,6 +806,7 @@ class AdgSpdxGenerator:
             ),
             doc_mapping=doc_mapping,
             logfile_hashes=logfile_hashes,
+            direct_only=direct_only,
         )
 
         # Write output
@@ -858,6 +874,17 @@ def main():
             "dynamic_libs.json for this binary"
         ),
     )
+    ap.add_argument(
+        "--direct-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Include only direct dependencies. "
+            "Use for two-tier SBOMs where "
+            "transitive deps belong to a "
+            "downstream binary's SBOM."
+        ),
+    )
     args = ap.parse_args()
 
     gen = AdgSpdxGenerator(
@@ -871,6 +898,7 @@ def main():
         args.output,
         binary_name=args.binary_name,
         dynlib_dir=args.dynlib_dir,
+        direct_only=args.direct_only,
     )
     if result:
         print(f"Success: {result}")

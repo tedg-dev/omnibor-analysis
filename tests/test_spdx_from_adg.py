@@ -544,6 +544,60 @@ class TestSpdxEmitter(unittest.TestCase):
         ]
         self.assertEqual(len(rels), 1)
 
+    def test_emit_direct_only_filters_transitive(self):
+        """direct_only=True excludes transitive deps."""
+        emitter = SpdxEmitter(
+            repo_name="curl",
+            repo_version="8.19.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name="curl",
+        )
+        components = [
+            {
+                "name": "glibc",
+                "version": "2.35",
+                "supplier": "Ubuntu",
+                "homepage": "NOASSERTION",
+                "dpkg_packages": ["libc6"],
+                "architecture": "amd64",
+                "purl": "pkg:deb/ubuntu/libc6@2.35",
+                "cpe23": "cpe:2.3:a:glibc:glibc:2.35:*:*:*:*:*:*:*",
+                "sonames": ["libc.so.6"],
+                "direct": True,
+            },
+            {
+                "name": "openssl",
+                "version": "3.0.2",
+                "supplier": "Ubuntu",
+                "homepage": "NOASSERTION",
+                "dpkg_packages": ["libssl3"],
+                "architecture": "amd64",
+                "purl": "pkg:deb/ubuntu/libssl3@3.0.2",
+                "cpe23": "cpe:2.3:a:openssl:openssl:3.0.2:*:*:*:*:*:*:*",
+                "sonames": ["libssl.so.3"],
+                "direct": False,
+            },
+        ]
+        doc = emitter.emit(
+            components=components,
+            project_files=[],
+            doc_mapping={},
+            logfile_hashes={},
+            direct_only=True,
+        )
+        # Root + glibc + gcc = 3 (openssl excluded)
+        self.assertEqual(len(doc["packages"]), 3)
+        names = [p["name"] for p in doc["packages"]]
+        self.assertIn("glibc", names)
+        self.assertNotIn("openssl", names)
+        # Only 1 DYNAMIC_LINK (glibc)
+        dyn_rels = [
+            r for r in doc["relationships"]
+            if r["relationshipType"] == "DYNAMIC_LINK"
+        ]
+        self.assertEqual(len(dyn_rels), 1)
+
     def test_emit_with_omnibor_ref(self):
         sha = "a" * 40
         emitter = SpdxEmitter(
