@@ -777,8 +777,12 @@ class TestSpdxGeneratorMetadata(unittest.TestCase):
                     "curl", repo_cfg,
                     paths, omnibor,
                 )
+            bom_dir = str(
+                Path(td) / "output"
+                / "omnibor" / "curl"
+            )
             mock_patch.assert_called_once_with(
-                result
+                result, bom_dir
             )
 
     def test_generate_no_patch_when_no_output(self):
@@ -819,6 +823,314 @@ class TestSpdxGeneratorMetadata(unittest.TestCase):
             # No bomsh output file, so no patch
             mock_patch.assert_not_called()
             self.assertIsNone(result)
+
+    def test_inject_omnibor_refs(self):
+        """ExternalRefs injected when logfile+mapping exist."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            # Create bomsh metadata
+            meta = (
+                Path(td) / "bom" / "metadata" / "bomsh"
+            )
+            meta.mkdir(parents=True)
+            sha_curl = "a" * 40
+            sha_lib = "b" * 40
+            (meta / "bomsh_hook_raw_logfile").write_text(
+                f"outfile: {sha_curl} path: /repo/src/.libs/curl\n"
+                f"outfile: {sha_lib} path: /repo/lib/.libs/libcurl.so\n"
+            )
+            (meta / "bomsh_omnibor_doc_mapping").write_text(
+                json.dumps({
+                    sha_curl: "omnibor_doc_curl",
+                    sha_lib: "omnibor_doc_libcurl",
+                })
+            )
+            # SPDX doc with matching packages
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/"
+                    "curl-a1b2c3d4-e5f6-7890-"
+                    "abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": ["Tool: syft-1.42.0"],
+                },
+                "packages": [
+                    {
+                        "name": "curl",
+                        "SPDXID": "SPDXRef-curl",
+                        "externalRefs": [],
+                    },
+                ],
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path, str(Path(td) / "bom")
+                )
+            self.assertTrue(ok)
+            result = json.loads(
+                Path(path).read_text()
+            )
+            refs = result["packages"][0][
+                "externalRefs"
+            ]
+            omnibor_refs = [
+                r for r in refs
+                if "gitoid" in r.get(
+                    "referenceLocator", ""
+                )
+            ]
+            self.assertEqual(len(omnibor_refs), 1)
+            self.assertIn(
+                "omnibor_doc_curl",
+                omnibor_refs[0]["referenceLocator"],
+            )
+
+    def test_inject_omnibor_refs_no_metadata(self):
+        """No crash when bom_dir has no metadata."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/"
+                    "curl-a1b2c3d4-e5f6-7890-"
+                    "abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [],
+                },
+                "packages": [
+                    {"name": "curl", "SPDXID": "x"},
+                ],
+            }
+            path = self._write_spdx(td, doc)
+            bom_dir = str(Path(td) / "empty_bom")
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path, bom_dir
+                )
+            self.assertTrue(ok)
+            result = json.loads(
+                Path(path).read_text()
+            )
+            # No ExternalRefs injected
+            refs = result["packages"][0].get(
+                "externalRefs", []
+            )
+            omnibor = [
+                r for r in refs
+                if "gitoid" in r.get(
+                    "referenceLocator", ""
+                )
+            ]
+            self.assertEqual(len(omnibor), 0)
+
+    def test_inject_omnibor_refs_no_match(self):
+        """No injection when package name doesn't match."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            meta = (
+                Path(td) / "bom" / "metadata" / "bomsh"
+            )
+            meta.mkdir(parents=True)
+            sha_other = "c" * 40
+            (meta / "bomsh_hook_raw_logfile").write_text(
+                f"outfile: {sha_other} path: /repo/other_bin\n"
+            )
+            (meta / "bomsh_omnibor_doc_mapping").write_text(
+                json.dumps({sha_other: "doc_other"})
+            )
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/"
+                    "curl-a1b2c3d4-e5f6-7890-"
+                    "abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [],
+                },
+                "packages": [
+                    {"name": "curl", "SPDXID": "x"},
+                ],
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path, str(Path(td) / "bom")
+                )
+            self.assertTrue(ok)
+            result = json.loads(
+                Path(path).read_text()
+            )
+            refs = result["packages"][0].get(
+                "externalRefs", []
+            )
+            self.assertEqual(len(refs), 0)
+
+    def test_inject_refs_bad_mapping_json(self):
+        """Graceful when mapping file has invalid JSON."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            meta = (
+                Path(td) / "bom" / "metadata" / "bomsh"
+            )
+            meta.mkdir(parents=True)
+            sha = "d" * 40
+            (meta / "bomsh_hook_raw_logfile").write_text(
+                f"outfile: {sha} path: /repo/curl\n"
+            )
+            (meta / "bomsh_omnibor_doc_mapping").write_text(
+                "not-json{{{"
+            )
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/"
+                    "curl-a1b2c3d4-e5f6-7890-"
+                    "abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [],
+                },
+                "packages": [
+                    {"name": "curl", "SPDXID": "x"},
+                ],
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path, str(Path(td) / "bom")
+                )
+            self.assertTrue(ok)
+
+    def test_inject_refs_logfile_only(self):
+        """Graceful when mapping file is missing."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            meta = (
+                Path(td) / "bom" / "metadata" / "bomsh"
+            )
+            meta.mkdir(parents=True)
+            sha = "e" * 40
+            (meta / "bomsh_hook_raw_logfile").write_text(
+                f"outfile: {sha} path: /repo/curl\n"
+            )
+            # No mapping file
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/"
+                    "curl-a1b2c3d4-e5f6-7890-"
+                    "abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [],
+                },
+                "packages": [
+                    {"name": "curl", "SPDXID": "x"},
+                ],
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path, str(Path(td) / "bom")
+                )
+            self.assertTrue(ok)
+
+    def test_inject_refs_hash_not_in_mapping(self):
+        """No ref when hash exists in logfile but not mapping."""
+        import json
+        with tempfile.TemporaryDirectory() as td:
+            meta = (
+                Path(td) / "bom" / "metadata" / "bomsh"
+            )
+            meta.mkdir(parents=True)
+            sha = "f" * 40
+            (meta / "bomsh_hook_raw_logfile").write_text(
+                f"outfile: {sha} path: /repo/curl\n"
+            )
+            (meta / "bomsh_omnibor_doc_mapping").write_text(
+                json.dumps({"other_hash": "doc"})
+            )
+            doc = {
+                "spdxVersion": "SPDX-2.3",
+                "name": "curl",
+                "documentNamespace": (
+                    "https://anchore.com/syft/"
+                    "curl-a1b2c3d4-e5f6-7890-"
+                    "abcd-ef1234567890"
+                ),
+                "creationInfo": {
+                    "created": "2026-01-01T00:00:00Z",
+                    "creators": [],
+                },
+                "packages": [
+                    {"name": "curl", "SPDXID": "x"},
+                ],
+            }
+            path = self._write_spdx(td, doc)
+            with patch.object(
+                SpdxGenerator, "_bomsh_version",
+                return_value="0.0.1",
+            ), patch.object(
+                SpdxGenerator, "_bomtrace_version",
+                return_value="6.11",
+            ), patch("builtins.print"):
+                ok = SpdxGenerator.patch_spdx_metadata(
+                    path, str(Path(td) / "bom")
+                )
+            self.assertTrue(ok)
+            result = json.loads(
+                Path(path).read_text()
+            )
+            refs = result["packages"][0].get(
+                "externalRefs", []
+            )
+            self.assertEqual(len(refs), 0)
 
 
 # ============================================================

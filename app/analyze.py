@@ -383,13 +383,15 @@ class SpdxGenerator:
     )
 
     @staticmethod
-    def patch_spdx_metadata(spdx_path):
+    def patch_spdx_metadata(spdx_path, bom_dir=None):
         """Patch SPDX metadata to credit OmniBOR tools.
 
         1. Replaces ``documentNamespace`` with an
            OmniBOR-based URI (preserving the UUID).
         2. Adds bomtrace3, bomsh, and omnibor-analysis
            to ``creationInfo.creators``.
+        3. Injects OmniBOR ExternalRefs into packages
+           when ``bom_dir`` is provided.
 
         Returns True on success, False on failure.
         """
@@ -446,6 +448,13 @@ class SpdxGenerator:
                 creators.append(entry)
 
         ci["creators"] = creators
+
+        # --- OmniBOR ExternalRefs ---
+        if bom_dir:
+            SpdxGenerator._inject_omnibor_refs(
+                doc, bom_dir
+            )
+
         path.write_text(
             _json.dumps(doc, indent=1) + "\n"
         )
@@ -458,6 +467,97 @@ class SpdxGenerator:
             + ", ".join(extra)
         )
         return True
+
+    @staticmethod
+    def _inject_omnibor_refs(doc, bom_dir):
+        """Inject OmniBOR ExternalRefs into SPDX packages.
+
+        Reads the bomsh raw logfile to map binary paths
+        to their build-time SHA1 hashes, then looks up
+        each hash in ``bomsh_omnibor_doc_mapping`` to get
+        the OmniBOR document identifier.  Adds a
+        ``PERSISTENT-ID`` ExternalRef with a ``gitoid``
+        locator to each matching SPDX package.
+
+        This works around a hash mismatch where libtool
+        may relink the binary after bomtrace3 records
+        the hash, causing bomsh_sbom.py to fail its
+        own ExternalRef injection.
+        """
+        import json as _json
+
+        bom = Path(bom_dir)
+        meta = bom / "metadata" / "bomsh"
+        logfile = meta / "bomsh_hook_raw_logfile"
+        mapping_file = (
+            meta / "bomsh_omnibor_doc_mapping"
+        )
+
+        if not logfile.exists():
+            return
+        if not mapping_file.exists():
+            return
+
+        try:
+            mapping = _json.loads(
+                mapping_file.read_text()
+            )
+        except Exception:
+            return
+
+        # Build path→hash from raw logfile
+        # Lines: "outfile: <sha1> path: <path>"
+        path_to_hash = {}
+        try:
+            for line in logfile.read_text(
+                errors="replace"
+            ).splitlines():
+                m = re.match(
+                    r"^outfile:\s+([0-9a-f]{40})"
+                    r"\s+path:\s+(.+)$",
+                    line,
+                )
+                if m:
+                    path_to_hash[m.group(2)] = (
+                        m.group(1)
+                    )
+        except Exception:
+            return
+
+        injected = 0
+        for pkg in doc.get("packages", []):
+            pkg_name = pkg.get("name", "")
+            # Match package name to binary basename
+            for bin_path, sha1 in (
+                path_to_hash.items()
+            ):
+                basename = Path(bin_path).name
+                if basename != pkg_name:
+                    continue
+                omnibor_id = mapping.get(sha1)
+                if not omnibor_id:
+                    continue
+                ref = {
+                    "referenceCategory":
+                        "PERSISTENT-ID",
+                    "referenceType": "gitoid",
+                    "referenceLocator":
+                        f"gitoid:blob:sha1:"
+                        f"{omnibor_id}",
+                }
+                refs = pkg.get("externalRefs", [])
+                # Avoid duplicates
+                if ref not in refs:
+                    refs.append(ref)
+                    pkg["externalRefs"] = refs
+                    injected += 1
+                break
+
+        if injected:
+            print(
+                f"[OK] Injected {injected} OmniBOR "
+                f"ExternalRef(s)"
+            )
 
     # --------------------------------------------------
     # Main generate
@@ -538,7 +638,9 @@ class SpdxGenerator:
         ))
         if generated:
             generated[0].rename(spdx_file)
-            self.patch_spdx_metadata(str(spdx_file))
+            self.patch_spdx_metadata(
+                str(spdx_file), str(bom_dir)
+            )
             print(
                 f"[OK] SPDX SBOM: {spdx_file.name}"
             )
