@@ -1,0 +1,784 @@
+#!/usr/bin/env python3
+"""
+Generate a complete SPDX 2.3 JSON document from OmniBOR ADG data.
+
+Reads the bomsh treedb, doc_mapping, raw logfile, and
+component_metadata.json (produced by collect_metadata.py) to
+build an SPDX SBOM that accurately represents every component
+compiled into the target binary.
+
+Each upstream source package (e.g. openssl, zlib, brotli) becomes
+an SPDX Package with:
+  - name, version, supplier, homepage
+  - PURL (pkg:deb/ubuntu/...)
+  - CPE 2.3 identifier
+  - OmniBOR ExternalRef (gitoid) where available
+  - DEPENDS_ON relationship from the main binary package
+
+The target binary itself is the root package with its OmniBOR
+ExternalRef and a CONTAINS relationship to its source files.
+
+Usage (standalone):
+
+    python3 spdx_from_adg.py \\
+        --bom-dir /output/omnibor/curl \\
+        --repos-dir /workspace/repos \\
+        --repo-name curl \\
+        --output /output/spdx/curl/curl_adg.spdx.json
+
+Classes:
+
+    - AdgParser: reads treedb and classifies artifacts
+    - ComponentResolver: maps artifacts to named components
+    - SpdxEmitter: produces SPDX 2.3 JSON from resolved data
+    - AdgSpdxGenerator: facade orchestrating the pipeline
+"""
+
+import argparse
+import json
+import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+# ============================================================
+# ADG Parser
+# ============================================================
+
+class AdgParser:
+    """Parse bomsh treedb and classify artifacts.
+
+    Artifact categories:
+      - system_lib: shared libraries under /usr/lib
+      - system_header: headers under /usr/include
+      - project_source: files under the project repo
+      - build_intermediate: .o files under the project repo
+      - crt_object: C runtime objects (crt*.o)
+    """
+
+    def __init__(self, bom_dir, repos_dir):
+        self.bom_dir = Path(bom_dir)
+        self.repos_dir = Path(repos_dir)
+        self.meta_dir = (
+            self.bom_dir / "metadata" / "bomsh"
+        )
+
+    def parse(self):
+        """Return classified artifacts dict.
+
+        Keys: system_lib, system_header,
+              project_source, build_intermediate,
+              crt_object.
+        Each value is a list of dicts with keys:
+          sha1, file_path, build_cmd (if present).
+        """
+        treedb_path = (
+            self.meta_dir / "bomsh_omnibor_treedb"
+        )
+        treedb = json.loads(treedb_path.read_text())
+
+        classified = {
+            "system_lib": [],
+            "system_header": [],
+            "project_source": [],
+            "build_intermediate": [],
+            "crt_object": [],
+        }
+
+        for sha1, entry in treedb.items():
+            fp = entry.get("file_path", "")
+            if not fp:
+                continue
+
+            item = {
+                "sha1": sha1,
+                "file_path": fp,
+            }
+            if "build_cmd" in entry:
+                item["build_cmd"] = entry["build_cmd"]
+
+            if fp.startswith("/usr/lib"):
+                base = Path(fp).name
+                if base.startswith("crt") and (
+                    base.endswith(".o")
+                ):
+                    classified["crt_object"].append(
+                        item
+                    )
+                elif base.endswith(".so") or (
+                    ".so." in base
+                ):
+                    classified["system_lib"].append(
+                        item
+                    )
+                else:
+                    # Static libs, other objects
+                    classified["system_lib"].append(
+                        item
+                    )
+            elif fp.startswith("/usr/include"):
+                classified["system_header"].append(
+                    item
+                )
+            elif fp.startswith(str(self.repos_dir)):
+                if fp.endswith(".o"):
+                    classified[
+                        "build_intermediate"
+                    ].append(item)
+                else:
+                    classified[
+                        "project_source"
+                    ].append(item)
+            else:
+                # Other system files
+                classified["system_header"].append(
+                    item
+                )
+
+        return classified
+
+    def load_doc_mapping(self):
+        """Return dict: sha1 -> omnibor_doc_id."""
+        path = (
+            self.meta_dir / "bomsh_omnibor_doc_mapping"
+        )
+        if not path.exists():
+            return {}
+        return json.loads(path.read_text())
+
+    def load_raw_logfile_hashes(self):
+        """Return dict: file_path -> build-time sha1."""
+        path = (
+            self.meta_dir / "bomsh_hook_raw_logfile"
+        )
+        if not path.exists():
+            return {}
+        result = {}
+        for line in path.read_text(
+            errors="replace"
+        ).splitlines():
+            m = re.match(
+                r"^outfile:\s+([0-9a-f]{40})"
+                r"\s+path:\s+(.+)$",
+                line,
+            )
+            if m:
+                result[m.group(2)] = m.group(1)
+        return result
+
+
+# ============================================================
+# Component Resolver
+# ============================================================
+
+class ComponentResolver:
+    """Resolve artifacts to named software components.
+
+    Uses component_metadata.json (from collect_metadata.py)
+    to map file paths to dpkg packages, then deduplicates
+    by upstream source package name.
+    """
+
+    def __init__(self, metadata_path):
+        self.metadata = json.loads(
+            Path(metadata_path).read_text()
+        )
+
+    @property
+    def distro(self):
+        return self.metadata.get("distro", "unknown")
+
+    @property
+    def distro_codename(self):
+        """Extract distro version for PURL qualifier."""
+        d = self.distro.lower()
+        # "Ubuntu 22.04.5 LTS" -> "ubuntu-22.04"
+        m = re.search(r"ubuntu\s+([\d.]+)", d)
+        if m:
+            # Use major.minor only
+            parts = m.group(1).split(".")
+            ver = ".".join(parts[:2])
+            return f"ubuntu-{ver}"
+        return "linux"
+
+    @property
+    def gcc_version(self):
+        return self.metadata.get(
+            "gcc_version", "unknown"
+        )
+
+    @property
+    def curl_version(self):
+        return self.metadata.get(
+            "curl_version", "unknown"
+        )
+
+    def resolve_system_components(self, artifacts):
+        """Group system artifacts into components.
+
+        Returns a list of component dicts, each with:
+          name, version, supplier, homepage, dpkg_package,
+          purl, cpe23, architecture, files (list of paths).
+        """
+        file_to_pkg = self.metadata.get(
+            "file_to_pkg", {}
+        )
+        pkg_meta = self.metadata.get(
+            "pkg_metadata", {}
+        )
+
+        # Group files by upstream source package
+        source_groups = {}
+        for art in artifacts:
+            fp = art["file_path"]
+            dpkg_pkg = file_to_pkg.get(fp)
+            if not dpkg_pkg:
+                continue
+            meta = pkg_meta.get(dpkg_pkg, {})
+            source = meta.get("Source", dpkg_pkg)
+            if source not in source_groups:
+                source_groups[source] = {
+                    "dpkg_packages": set(),
+                    "meta": meta,
+                    "files": [],
+                }
+            source_groups[source][
+                "dpkg_packages"
+            ].add(dpkg_pkg)
+            source_groups[source]["files"].append(fp)
+
+        components = []
+        for source, group in sorted(
+            source_groups.items()
+        ):
+            meta = group["meta"]
+            version = meta.get("Version", "unknown")
+            arch = meta.get("Architecture", "amd64")
+            # Use first dpkg package for PURL
+            dpkg_pkg = sorted(
+                group["dpkg_packages"]
+            )[0]
+
+            # Strip epoch and dfsg suffix for CPE
+            cpe_ver = self._clean_version(version)
+
+            comp = {
+                "name": source,
+                "version": version,
+                "supplier": meta.get(
+                    "Maintainer", "NOASSERTION"
+                ),
+                "homepage": meta.get(
+                    "Homepage", "NOASSERTION"
+                ),
+                "dpkg_packages": sorted(
+                    group["dpkg_packages"]
+                ),
+                "architecture": arch,
+                "purl": self._make_purl(
+                    dpkg_pkg, version, arch
+                ),
+                "cpe23": self._make_cpe(
+                    source, cpe_ver
+                ),
+                "files": sorted(
+                    set(group["files"])
+                ),
+            }
+            components.append(comp)
+
+        return components
+
+    def _clean_version(self, version):
+        """Strip epoch, dfsg, ubuntu suffixes for CPE."""
+        v = version
+        # Remove epoch (e.g. "1:1.2.11...")
+        if ":" in v:
+            v = v.split(":", 1)[1]
+        # Remove dfsg suffix
+        v = re.sub(r"[.+]dfsg.*", "", v)
+        # Remove ubuntu/build suffix
+        v = re.sub(r"-\d+ubuntu.*", "", v)
+        v = re.sub(r"-\d+build.*", "", v)
+        v = re.sub(r"-\d+$", "", v)
+        return v
+
+    def _make_purl(self, dpkg_pkg, version, arch):
+        """Generate Package URL."""
+        distro = self.distro_codename
+        return (
+            f"pkg:deb/ubuntu/{dpkg_pkg}"
+            f"@{version}"
+            f"?arch={arch}&distro={distro}"
+        )
+
+    def _make_cpe(self, source, version):
+        """Generate CPE 2.3 identifier."""
+        # Normalize vendor: use source name as vendor
+        vendor = source.replace("-", "_")
+        product = source.replace("-", "_")
+        return (
+            f"cpe:2.3:a:{vendor}:{product}"
+            f":{version}:*:*:*:*:*:*:*"
+        )
+
+
+# ============================================================
+# SPDX Emitter
+# ============================================================
+
+class SpdxEmitter:
+    """Produce SPDX 2.3 JSON from resolved components.
+
+    Generates a complete SPDX document with:
+      - Document-level metadata (namespace, creators)
+      - Root package for the target binary
+      - One package per upstream component
+      - ExternalRefs: PURL, CPE, OmniBOR gitoid
+      - Relationships: DEPENDS_ON, BUILD_TOOL_OF
+      - File entries for project source files
+    """
+
+    NAMESPACE_PREFIX = (
+        "https://omnibor.io/omnibor-analysis"
+    )
+
+    def __init__(
+        self, repo_name, repo_version,
+        distro, gcc_version,
+        bomtrace_version="unknown",
+        bomsh_version="unknown",
+    ):
+        self.repo_name = repo_name
+        self.repo_version = repo_version
+        self.distro = distro
+        self.gcc_version = gcc_version
+        self.bomtrace_version = bomtrace_version
+        self.bomsh_version = bomsh_version
+        self._spdx_id_counter = 0
+
+    def _next_spdx_id(self, prefix="Package"):
+        """Generate unique SPDX identifier."""
+        self._spdx_id_counter += 1
+        return (
+            f"SPDXRef-{prefix}"
+            f"-{self._spdx_id_counter}"
+        )
+
+    def _sanitize_spdx_id(self, name):
+        """Sanitize a name for use in SPDX IDs."""
+        return re.sub(r"[^a-zA-Z0-9._-]", "-", name)
+
+    def emit(
+        self, components, project_files,
+        doc_mapping, logfile_hashes,
+    ):
+        """Generate SPDX 2.3 JSON dict.
+
+        Args:
+            components: list of resolved component dicts
+            project_files: list of project source artifacts
+            doc_mapping: sha1 -> omnibor_doc_id
+            logfile_hashes: file_path -> build-time sha1
+
+        Returns:
+            dict: complete SPDX 2.3 JSON document
+        """
+        doc_uuid = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+
+        doc = {
+            "spdxVersion": "SPDX-2.3",
+            "dataLicense": "CC0-1.0",
+            "SPDXID": "SPDXRef-DOCUMENT",
+            "name": self.repo_name,
+            "documentNamespace": (
+                f"{self.NAMESPACE_PREFIX}"
+                f"/{self.repo_name}-{doc_uuid}"
+            ),
+            "creationInfo": {
+                "created": now,
+                "creators": [
+                    f"Tool: bomtrace3"
+                    f"-{self.bomtrace_version}",
+                    f"Tool: bomsh"
+                    f"-{self.bomsh_version}",
+                    "Tool: omnibor-analysis"
+                    " (github.com/tedg-dev"
+                    "/omnibor-analysis)",
+                ],
+                "licenseListVersion": "3.19",
+            },
+            "packages": [],
+            "files": [],
+            "relationships": [],
+        }
+
+        # --- Root package: the target binary ---
+        root_id = "SPDXRef-Package-root"
+        root_pkg = {
+            "SPDXID": root_id,
+            "name": self.repo_name,
+            "versionInfo": self.repo_version,
+            "supplier": "NOASSERTION",
+            "downloadLocation": "NOASSERTION",
+            "filesAnalyzed": True,
+            "primaryPackagePurpose": "APPLICATION",
+            "builtDate": now,
+            "externalRefs": [],
+            "checksums": [],
+            "comment": (
+                f"Built on {self.distro} with "
+                f"{self.gcc_version}"
+            ),
+        }
+
+        # Add OmniBOR ref for root binary
+        for bin_path, sha1 in (
+            logfile_hashes.items()
+        ):
+            basename = Path(bin_path).name
+            if basename == self.repo_name:
+                omnibor_id = doc_mapping.get(sha1)
+                if omnibor_id:
+                    root_pkg["externalRefs"].append({
+                        "referenceCategory":
+                            "PERSISTENT-ID",
+                        "referenceType": "gitoid",
+                        "referenceLocator":
+                            f"gitoid:blob:sha1:"
+                            f"{omnibor_id}",
+                    })
+                root_pkg["checksums"].append({
+                    "algorithm": "SHA1",
+                    "checksumValue": sha1,
+                })
+                break
+
+        doc["packages"].append(root_pkg)
+
+        # DESCRIBES relationship
+        doc["relationships"].append({
+            "spdxElementId": "SPDXRef-DOCUMENT",
+            "relationshipType": "DESCRIBES",
+            "relatedSpdxElement": root_id,
+        })
+
+        # --- Component packages ---
+        for comp in components:
+            safe_name = self._sanitize_spdx_id(
+                comp["name"]
+            )
+            pkg_id = self._next_spdx_id(safe_name)
+
+            pkg = {
+                "SPDXID": pkg_id,
+                "name": comp["name"],
+                "versionInfo": comp["version"],
+                "supplier": (
+                    f"Organization: "
+                    f"{comp['supplier']}"
+                    if comp["supplier"]
+                    != "NOASSERTION"
+                    else "NOASSERTION"
+                ),
+                "downloadLocation": (
+                    comp["homepage"]
+                    if comp["homepage"]
+                    != "NOASSERTION"
+                    else "NOASSERTION"
+                ),
+                "homepage": comp.get(
+                    "homepage", "NOASSERTION"
+                ),
+                "filesAnalyzed": False,
+                "externalRefs": [],
+                "comment": (
+                    f"dpkg: "
+                    f"{', '.join(comp['dpkg_packages'])}"
+                    f" ({comp['architecture']})"
+                ),
+            }
+
+            # PURL
+            pkg["externalRefs"].append({
+                "referenceCategory":
+                    "PACKAGE-MANAGER",
+                "referenceType": "purl",
+                "referenceLocator": comp["purl"],
+            })
+
+            # CPE
+            pkg["externalRefs"].append({
+                "referenceCategory": "SECURITY",
+                "referenceType": "cpe23Type",
+                "referenceLocator": comp["cpe23"],
+            })
+
+            doc["packages"].append(pkg)
+
+            # DEPENDS_ON from root
+            doc["relationships"].append({
+                "spdxElementId": root_id,
+                "relationshipType": "DEPENDS_ON",
+                "relatedSpdxElement": pkg_id,
+            })
+
+        # --- GCC as build tool ---
+        gcc_id = self._next_spdx_id("gcc")
+        gcc_ver_clean = re.search(
+            r"(\d+\.\d+\.\d+)", self.gcc_version
+        )
+        gcc_ver = (
+            gcc_ver_clean.group(1)
+            if gcc_ver_clean
+            else self.gcc_version
+        )
+        gcc_pkg = {
+            "SPDXID": gcc_id,
+            "name": "gcc",
+            "versionInfo": gcc_ver,
+            "supplier": (
+                "Organization: "
+                "Free Software Foundation"
+            ),
+            "downloadLocation": "https://gcc.gnu.org/",
+            "homepage": "https://gcc.gnu.org/",
+            "filesAnalyzed": False,
+            "primaryPackagePurpose": "APPLICATION",
+            "externalRefs": [{
+                "referenceCategory": "SECURITY",
+                "referenceType": "cpe23Type",
+                "referenceLocator": (
+                    f"cpe:2.3:a:gnu:gcc:{gcc_ver}"
+                    f":*:*:*:*:*:*:*"
+                ),
+            }],
+        }
+        doc["packages"].append(gcc_pkg)
+        doc["relationships"].append({
+            "spdxElementId": gcc_id,
+            "relationshipType": "BUILD_TOOL_OF",
+            "relatedSpdxElement": root_id,
+        })
+
+        # --- Project source files ---
+        for art in project_files:
+            fp = art["file_path"]
+            # Only include .c, .h, .S files
+            ext = Path(fp).suffix.lower()
+            if ext not in (
+                ".c", ".h", ".s", ".inc",
+            ):
+                continue
+
+            safe = self._sanitize_spdx_id(
+                Path(fp).name
+            )
+            file_id = self._next_spdx_id(
+                f"File-{safe}"
+            )
+            # Make path relative to repo
+            rel_path = fp
+            try:
+                rel_path = str(
+                    Path(fp).relative_to(
+                        Path(fp).parents[
+                            len(Path(fp).parts) - 3
+                        ]
+                    )
+                )
+            except (ValueError, IndexError):
+                pass
+
+            file_entry = {
+                "SPDXID": file_id,
+                "fileName": rel_path,
+                "checksums": [{
+                    "algorithm": "SHA1",
+                    "checksumValue": art["sha1"],
+                }],
+            }
+            doc["files"].append(file_entry)
+
+            doc["relationships"].append({
+                "spdxElementId": root_id,
+                "relationshipType": "CONTAINS",
+                "relatedSpdxElement": file_id,
+            })
+
+        return doc
+
+
+# ============================================================
+# Facade
+# ============================================================
+
+class AdgSpdxGenerator:
+    """Facade: generate complete SPDX from ADG data.
+
+    Orchestrates AdgParser, ComponentResolver, and
+    SpdxEmitter to produce a single SPDX 2.3 JSON file.
+    """
+
+    def __init__(
+        self, bom_dir, repos_dir, repo_name,
+        bomtrace_version="unknown",
+        bomsh_version="unknown",
+    ):
+        self.bom_dir = Path(bom_dir)
+        self.repos_dir = Path(repos_dir)
+        self.repo_name = repo_name
+        self.bomtrace_version = bomtrace_version
+        self.bomsh_version = bomsh_version
+
+    def generate(self, output_path):
+        """Generate SPDX and write to output_path.
+
+        Returns the output path on success, None on
+        failure.
+        """
+        # Parse ADG
+        parser = AdgParser(
+            self.bom_dir, self.repos_dir
+        )
+        classified = parser.parse()
+        doc_mapping = parser.load_doc_mapping()
+        logfile_hashes = (
+            parser.load_raw_logfile_hashes()
+        )
+
+        print(
+            f"[ADG] System libs: "
+            f"{len(classified['system_lib'])}, "
+            f"Headers: "
+            f"{len(classified['system_header'])}, "
+            f"Source: "
+            f"{len(classified['project_source'])}, "
+            f"Intermediates: "
+            f"{len(classified['build_intermediate'])}"
+        )
+
+        # Load component metadata
+        meta_path = (
+            self.bom_dir / "metadata"
+            / "component_metadata.json"
+        )
+        if not meta_path.exists():
+            print(
+                "[ERROR] component_metadata.json "
+                "not found. Run collect_metadata.py "
+                "first."
+            )
+            return None
+
+        resolver = ComponentResolver(str(meta_path))
+
+        # Resolve system artifacts to components
+        all_system = (
+            classified["system_lib"]
+            + classified["system_header"]
+            + classified["crt_object"]
+        )
+        components = (
+            resolver.resolve_system_components(
+                all_system
+            )
+        )
+        print(
+            f"[ADG] Resolved {len(components)} "
+            f"upstream components"
+        )
+
+        # Emit SPDX
+        emitter = SpdxEmitter(
+            repo_name=self.repo_name,
+            repo_version=resolver.curl_version,
+            distro=resolver.distro,
+            gcc_version=resolver.gcc_version,
+            bomtrace_version=self.bomtrace_version,
+            bomsh_version=self.bomsh_version,
+        )
+
+        doc = emitter.emit(
+            components=components,
+            project_files=(
+                classified["project_source"]
+            ),
+            doc_mapping=doc_mapping,
+            logfile_hashes=logfile_hashes,
+        )
+
+        # Write output
+        out = Path(output_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(
+            json.dumps(doc, indent=2) + "\n"
+        )
+
+        pkg_count = len(doc["packages"])
+        file_count = len(doc["files"])
+        rel_count = len(doc["relationships"])
+        print(
+            f"[OK] ADG SPDX: {out.name} "
+            f"({pkg_count} packages, "
+            f"{file_count} files, "
+            f"{rel_count} relationships)"
+        )
+        return str(out)
+
+
+# ============================================================
+# CLI
+# ============================================================
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=(
+            "Generate SPDX 2.3 from OmniBOR ADG data"
+        ),
+    )
+    ap.add_argument(
+        "--bom-dir", required=True,
+        help="Path to OmniBOR output dir for repo",
+    )
+    ap.add_argument(
+        "--repos-dir", required=True,
+        help="Path to repos directory",
+    )
+    ap.add_argument(
+        "--repo-name", required=True,
+        help="Repository name (e.g. curl)",
+    )
+    ap.add_argument(
+        "--output", required=True,
+        help="Output SPDX JSON file path",
+    )
+    ap.add_argument(
+        "--bomtrace-version", default="unknown",
+    )
+    ap.add_argument(
+        "--bomsh-version", default="unknown",
+    )
+    args = ap.parse_args()
+
+    gen = AdgSpdxGenerator(
+        bom_dir=args.bom_dir,
+        repos_dir=args.repos_dir,
+        repo_name=args.repo_name,
+        bomtrace_version=args.bomtrace_version,
+        bomsh_version=args.bomsh_version,
+    )
+    result = gen.generate(args.output)
+    if result:
+        print(f"Success: {result}")
+    else:
+        print("Failed to generate SPDX")
+        raise SystemExit(1)
+
+
+if __name__ == "__main__":
+    main()
