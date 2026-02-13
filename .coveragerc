@@ -3,4 +3,10 @@
 # and are not testable as Python application logic.
 omit =
     app/apply_qemu_fallback.py
+    app/collect_metadata.py
+    app/collect_dynamic_libs.py
     docker/patches/*
+
+[report]
+exclude_lines =
+    if __name__ == .__main__.

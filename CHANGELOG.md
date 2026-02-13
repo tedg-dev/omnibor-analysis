@@ -21,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **ADG-based SPDX generator** (`app/spdx_from_adg.py`) — generates complete SPDX 2.3 JSON
+  directly from OmniBOR ADG data, replacing the incomplete bomsh_sbom.py output:
+  - `AdgParser`: reads bomsh treedb and classifies all build artifacts
+  - `ComponentResolver`: maps system files to dpkg packages with name, version, supplier,
+    homepage, PURL (`pkg:deb/ubuntu/...`), and CPE 2.3 identifiers
+  - `SpdxEmitter`: produces SPDX with packages, source files, relationships
+    (DEPENDS_ON, BUILD_TOOL_OF, CONTAINS), and OmniBOR ExternalRefs
+  - For curl: 13 packages, 441 source files, 454 relationships (vs 2 packages from bomsh_sbom.py)
+- **Metadata collection script** (`app/collect_metadata.py`) — runs inside the build container
+  to resolve system files to dpkg packages via `dpkg -S` and extract rich metadata
 - `SpdxValidator` class in `analyze.py` — two-phase SPDX v2.3 validation:
   1. JSON Schema validation against the official SPDX 2.3 schema (via `jsonschema`)
   2. Semantic validation via `spdx-tools` (`parse_file` + `validate_full_spdx_document`)
