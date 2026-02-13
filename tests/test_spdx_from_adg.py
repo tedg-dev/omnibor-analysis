@@ -625,6 +625,82 @@ class TestSpdxEmitter(unittest.TestCase):
         )
 
 
+class TestSpdxEmitterPerBinary(unittest.TestCase):
+    """Tests for per-binary SPDX generation."""
+
+    def test_shared_lib_root_purpose(self):
+        """libcurl.so root should be LIBRARY."""
+        emitter = SpdxEmitter(
+            repo_name="curl",
+            repo_version="8.19.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name="libcurl.so",
+        )
+        doc = emitter.emit(
+            components=[], project_files=[],
+            doc_mapping={}, logfile_hashes={},
+        )
+        root = doc["packages"][0]
+        self.assertEqual(root["name"], "libcurl.so")
+        self.assertEqual(
+            root["primaryPackagePurpose"],
+            "LIBRARY",
+        )
+        self.assertEqual(doc["name"], "libcurl.so")
+
+    def test_application_root_purpose(self):
+        """curl binary root should be APPLICATION."""
+        emitter = SpdxEmitter(
+            repo_name="curl",
+            repo_version="8.19.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name="curl",
+        )
+        doc = emitter.emit(
+            components=[], project_files=[],
+            doc_mapping={}, logfile_hashes={},
+        )
+        root = doc["packages"][0]
+        self.assertEqual(root["name"], "curl")
+        self.assertEqual(
+            root["primaryPackagePurpose"],
+            "APPLICATION",
+        )
+
+    def test_binary_name_defaults_to_repo(self):
+        """binary_name defaults to repo_name."""
+        emitter = SpdxEmitter(
+            repo_name="curl",
+            repo_version="8.19.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+        )
+        self.assertEqual(
+            emitter.binary_name, "curl"
+        )
+
+    def test_so_version_in_name(self):
+        """libfoo.so.3 should be LIBRARY."""
+        emitter = SpdxEmitter(
+            repo_name="foo",
+            repo_version="1.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name="libfoo.so.3",
+        )
+        doc = emitter.emit(
+            components=[], project_files=[],
+            doc_mapping={}, logfile_hashes={},
+        )
+        root = doc["packages"][0]
+        self.assertEqual(
+            root["primaryPackagePurpose"],
+            "LIBRARY",
+        )
+
+
 class TestComponentResolverEdgeCases(
     unittest.TestCase
 ):
@@ -736,6 +812,70 @@ class TestAdgSpdxGenerator(unittest.TestCase):
                 doc["spdxVersion"], "SPDX-2.3"
             )
             # Root + openssl + gcc = 3
+            self.assertEqual(
+                len(doc["packages"]), 3
+            )
+
+    def test_generate_per_binary_with_dynlib_dir(self):
+        """Generate SPDX for libcurl.so with separate dynlib_dir."""
+        with tempfile.TemporaryDirectory() as td:
+            bom_dir = self._setup_full(td)
+
+            # Create separate dynlib dir for libcurl.so
+            libcurl_dl = Path(td) / "libcurl_dynlibs"
+            libcurl_dl.mkdir()
+            dynlibs = {
+                "binary": "/repos/curl/lib/.libs/libcurl.so",
+                "direct_needed": ["libz.so.1"],
+                "dynamic_libs": {
+                    "libz.so.1": {
+                        "path": "/lib/libz.so.1",
+                        "real_path": "/lib/libz.so.1",
+                        "direct": True,
+                        "dpkg_package": "zlib1g",
+                        "source": "zlib",
+                        "metadata": {
+                            "Package": "zlib1g",
+                            "Version": "1.2.11",
+                            "Source": "zlib",
+                            "Maintainer": "Ubuntu",
+                            "Homepage": "http://zlib.net",
+                            "Architecture": "amd64",
+                        },
+                    },
+                },
+                "libcurl_needed": [],
+            }
+            (libcurl_dl / "dynamic_libs.json").write_text(
+                json.dumps(dynlibs)
+            )
+
+            out = str(
+                Path(td) / "out" / "libcurl.spdx.json"
+            )
+            gen = AdgSpdxGenerator(
+                bom_dir=bom_dir,
+                repos_dir="/repos",
+                repo_name="curl",
+            )
+            with patch("builtins.print"):
+                result = gen.generate(
+                    out,
+                    binary_name="libcurl.so",
+                    dynlib_dir=str(libcurl_dl),
+                )
+
+            self.assertIsNotNone(result)
+            doc = json.loads(Path(out).read_text())
+            root = doc["packages"][0]
+            self.assertEqual(
+                root["name"], "libcurl.so"
+            )
+            self.assertEqual(
+                root["primaryPackagePurpose"],
+                "LIBRARY",
+            )
+            # Root + zlib + gcc = 3
             self.assertEqual(
                 len(doc["packages"]), 3
             )
