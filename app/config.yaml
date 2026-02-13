@@ -1,100 +1,83 @@
-# OmniBOR Analysis Configuration
-# Defines target repositories, build commands, and output paths
-
 repos:
   curl:
     url: https://github.com/curl/curl.git
     branch: master
     build_steps:
-      - autoreconf -fi
-      - ./configure --with-openssl --with-zlib --with-nghttp2 --with-libssh2 --with-brotli
-      - make -j$(nproc)
+    - autoreconf -fi
+    - ./configure --with-openssl --with-zlib --with-nghttp2 --with-libssh2 --with-brotli
+    - make -j$(nproc)
     clean_cmd: make clean
-    description: "HTTP transfer library and CLI tool (~170K LoC)"
+    description: HTTP transfer library and CLI tool (~170K LoC)
     output_binaries:
-      - src/.libs/curl
-      - lib/.libs/libcurl.so
-    # Required -dev packages for this repo's build.
-    # Explicit = required by --with-* flags; auto-detected = probed by ./configure.
+    - src/.libs/curl
+    - lib/.libs/libcurl.so
     apt_deps:
-      - libssl-dev        # --with-openssl
-      - zlib1g-dev        # --with-zlib
-      - libnghttp2-dev    # --with-nghttp2
-      - libssh2-1-dev     # --with-libssh2
-      - libbrotli-dev     # --with-brotli
-      - libpsl-dev        # auto-detected (cookie PSL)
-      - libzstd-dev       # auto-detected (zstd compression)
-      - libc-ares-dev     # auto-detected (async DNS)
-      - libidn2-dev       # auto-detected (IDN support)
-      - libpcre2-dev      # auto-detected (regex)
-
+    - libssl-dev
+    - zlib1g-dev
+    - libnghttp2-dev
+    - libssh2-1-dev
+    - libbrotli-dev
+    - libpsl-dev
+    - libzstd-dev
+    - libc-ares-dev
+    - libidn2-dev
+    - libpcre2-dev
   ffmpeg:
     url: https://github.com/FFmpeg/FFmpeg.git
     branch: master
     build_steps:
-      - >-
-        ./configure
-        --enable-gpl
-        --enable-nonfree
-        --enable-libx264
-        --enable-libx265
-        --enable-libvpx
-        --enable-libopus
-        --enable-libmp3lame
-        --enable-libfdk-aac
-        --enable-libfreetype
-        --enable-libfontconfig
-        --enable-libfribidi
-        --enable-libass
-        --enable-openssl
-      - make -j$(nproc)
+    - ./configure --enable-gpl --enable-nonfree --enable-libx264 --enable-libx265 --enable-libvpx --enable-libopus --enable-libmp3lame
+      --enable-libfdk-aac --enable-libfreetype --enable-libfontconfig --enable-libfribidi --enable-libass --enable-openssl
+    - make -j$(nproc)
     clean_cmd: make clean
-    description: "Multimedia framework (~1.2M LoC, 20+ third-party libs)"
+    description: Multimedia framework (~1.2M LoC, 20+ third-party libs)
     output_binaries:
-      - ffmpeg
-      - ffprobe
-      - libavcodec/libavcodec.so
-      - libavformat/libavformat.so
-      - libavutil/libavutil.so
-      - libswscale/libswscale.so
-    # Required -dev packages for this repo's build.
-    # All are explicit --enable-* flags in ./configure.
+    - ffmpeg
+    - ffprobe
+    - libavcodec/libavcodec.so
+    - libavformat/libavformat.so
+    - libavutil/libavutil.so
+    - libswscale/libswscale.so
     apt_deps:
-      - libssl-dev          # --enable-openssl
-      - libx264-dev         # --enable-libx264
-      - libx265-dev         # --enable-libx265
-      - libvpx-dev          # --enable-libvpx
-      - libopus-dev         # --enable-libopus
-      - libmp3lame-dev      # --enable-libmp3lame
-      - libfdk-aac-dev      # --enable-libfdk-aac
-      - libfreetype-dev     # --enable-libfreetype
-      - libfontconfig1-dev  # --enable-libfontconfig
-      - libfribidi-dev      # --enable-libfribidi
-      - libass-dev          # --enable-libass
-      - nasm                # x86 assembly optimization
-      - yasm                # x86 assembly optimization
-
-# Paths (relative to /workspace inside container)
+    - libssl-dev
+    - libx264-dev
+    - libx265-dev
+    - libvpx-dev
+    - libopus-dev
+    - libmp3lame-dev
+    - libfdk-aac-dev
+    - libfreetype-dev
+    - libfontconfig1-dev
+    - libfribidi-dev
+    - libass-dev
+    - nasm
+    - yasm
+  redis:
+    url: https://github.com/redis/redis.git
+    branch: unstable
+    build_steps:
+    - make -j$(nproc)
+    clean_cmd: make clean
+    description: In-memory data store with 8 vendored libs (jemalloc, lua, hiredis, etc.) (~293K LoC, C)
+    output_binaries:
+    - src/redis-server
+    - src/redis-cli
 paths:
   repos_dir: /workspace/repos
   output_dir: /workspace/output
   docs_dir: /workspace/docs
   bomsh_dir: /opt/bomsh
-
-# OmniBOR settings
 omnibor:
   tracer: bomtrace3
   create_bom_script: bomsh_create_bom.py
   sbom_script: bomsh_sbom.py
   raw_logfile: /tmp/bomsh_hook_raw_logfile.sha1
-
-# Doc naming
 docs:
-  timestamp_format: "%Y-%m-%d_%H%M"
+  timestamp_format: '%Y-%m-%d_%H%M'
   types:
-    - build
-    - omnibor
-    - spdx
-    - binary-scan
-    - comparison
-    - runtime
+  - build
+  - omnibor
+  - spdx
+  - binary-scan
+  - comparison
+  - runtime
