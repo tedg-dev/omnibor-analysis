@@ -393,6 +393,44 @@ class SpdxEmitter:
         """Sanitize a name for use in SPDX IDs."""
         return re.sub(r"[^a-zA-Z0-9._-]", "-", name)
 
+    # Directories that indicate vendored/embedded
+    # third-party source code.
+    VENDORED_DIRS = (
+        "/deps/", "/vendor/", "/third_party/",
+        "/thirdparty/", "/external/", "/contrib/",
+    )
+
+    def _detect_vendored_groups(self, project_files):
+        """Group source files by vendored library.
+
+        Scans project_files for paths matching
+        VENDORED_DIRS patterns. Returns:
+          vendored: dict[lib_name] -> list[artifact]
+          own: list[artifact]  (non-vendored)
+        """
+        vendored = {}
+        own = []
+        for art in project_files:
+            fp = art["file_path"]
+            matched = False
+            for vdir in self.VENDORED_DIRS:
+                idx = fp.find(vdir)
+                if idx < 0:
+                    continue
+                # Extract library name: first path
+                # component after the vendored dir
+                rest = fp[idx + len(vdir):]
+                lib = rest.split("/")[0]
+                if lib:
+                    vendored.setdefault(
+                        lib, []
+                    ).append(art)
+                    matched = True
+                    break
+            if not matched:
+                own.append(art)
+        return vendored, own
+
     def emit(
         self, components, project_files,
         doc_mapping, logfile_hashes,
@@ -627,13 +665,68 @@ class SpdxEmitter:
             "relatedSpdxElement": root_id,
         })
 
+        # --- Vendored (statically linked) packages ---
+        vendored, own_files = (
+            self._detect_vendored_groups(
+                project_files
+            )
+        )
+        # Map vendored lib name -> SPDX package ID
+        vendored_pkg_ids = {}
+        for lib_name in sorted(vendored.keys()):
+            safe_name = self._sanitize_spdx_id(
+                lib_name
+            )
+            pkg_id = self._next_spdx_id(safe_name)
+            vendored_pkg_ids[lib_name] = pkg_id
+
+            src_count = len([
+                a for a in vendored[lib_name]
+                if Path(a["file_path"]).suffix.lower()
+                in (".c", ".h", ".s", ".inc",
+                    ".cc", ".cpp", ".cxx", ".hpp")
+            ])
+            pkg = {
+                "SPDXID": pkg_id,
+                "name": lib_name,
+                "versionInfo": "NOASSERTION",
+                "supplier": "NOASSERTION",
+                "downloadLocation": "NOASSERTION",
+                "filesAnalyzed": True,
+                "primaryPackagePurpose": "LIBRARY",
+                "externalRefs": [],
+                "comment": (
+                    f"Vendored/statically linked. "
+                    f"{src_count} source files "
+                    f"compiled into {self.binary_name}"
+                ),
+            }
+            doc["packages"].append(pkg)
+
+            # STATIC_LINK from root
+            doc["relationships"].append({
+                "spdxElementId": root_id,
+                "relationshipType":
+                    "STATIC_LINK",
+                "relatedSpdxElement": pkg_id,
+            })
+
         # --- Project source files ---
-        for art in project_files:
+        all_source = (
+            [(art, None) for art in own_files]
+            + [
+                (art, lib)
+                for lib, arts in vendored.items()
+                for art in arts
+            ]
+        )
+        for art, vendored_lib in all_source:
             fp = art["file_path"]
             # Only include .c, .h, .S files
             ext = Path(fp).suffix.lower()
             if ext not in (
                 ".c", ".h", ".s", ".inc",
+                ".cc", ".cpp", ".cxx", ".hpp",
             ):
                 continue
 
@@ -666,8 +759,15 @@ class SpdxEmitter:
             }
             doc["files"].append(file_entry)
 
+            # Vendored files belong to their
+            # library package; others to root
+            owner_id = (
+                vendored_pkg_ids[vendored_lib]
+                if vendored_lib
+                else root_id
+            )
             doc["relationships"].append({
-                "spdxElementId": root_id,
+                "spdxElementId": owner_id,
                 "relationshipType": "CONTAINS",
                 "relatedSpdxElement": file_id,
             })

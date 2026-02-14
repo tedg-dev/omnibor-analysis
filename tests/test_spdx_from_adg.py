@@ -679,6 +679,168 @@ class TestSpdxEmitter(unittest.TestCase):
         )
 
 
+class TestSpdxEmitterVendored(unittest.TestCase):
+    """Tests for vendored/static dependency detection."""
+
+    def _emitter(self, binary_name="redis-server"):
+        return SpdxEmitter(
+            repo_name="redis",
+            repo_version="7.2.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name=binary_name,
+        )
+
+    def test_detect_vendored_groups(self):
+        """Files under deps/ are grouped by library."""
+        emitter = self._emitter()
+        files = [
+            {"sha1": "a1", "file_path":
+                "/repos/redis/deps/lua/src/lapi.c"},
+            {"sha1": "a2", "file_path":
+                "/repos/redis/deps/lua/src/lapi.h"},
+            {"sha1": "a3", "file_path":
+                "/repos/redis/deps/jemalloc/src/arena.c"},
+            {"sha1": "a4", "file_path":
+                "/repos/redis/src/server.c"},
+        ]
+        vendored, own = (
+            emitter._detect_vendored_groups(files)
+        )
+        self.assertEqual(sorted(vendored.keys()),
+                         ["jemalloc", "lua"])
+        self.assertEqual(len(vendored["lua"]), 2)
+        self.assertEqual(len(vendored["jemalloc"]), 1)
+        self.assertEqual(len(own), 1)
+        self.assertEqual(
+            own[0]["file_path"],
+            "/repos/redis/src/server.c",
+        )
+
+    def test_vendored_dirs_patterns(self):
+        """All VENDORED_DIRS patterns are detected."""
+        emitter = self._emitter()
+        files = [
+            {"sha1": "a", "file_path":
+                "/r/deps/libA/x.c"},
+            {"sha1": "b", "file_path":
+                "/r/vendor/libB/y.c"},
+            {"sha1": "c", "file_path":
+                "/r/third_party/libC/z.c"},
+            {"sha1": "d", "file_path":
+                "/r/thirdparty/libD/w.c"},
+            {"sha1": "e", "file_path":
+                "/r/external/libE/v.c"},
+            {"sha1": "f", "file_path":
+                "/r/contrib/libF/u.c"},
+        ]
+        vendored, own = (
+            emitter._detect_vendored_groups(files)
+        )
+        self.assertEqual(
+            sorted(vendored.keys()),
+            ["libA", "libB", "libC",
+             "libD", "libE", "libF"],
+        )
+        self.assertEqual(len(own), 0)
+
+    def test_emit_creates_vendored_packages(self):
+        """Vendored libs become SPDX packages."""
+        emitter = self._emitter()
+        files = [
+            {"sha1": "a1", "file_path":
+                "/repos/redis/deps/lua/src/lapi.c"},
+            {"sha1": "a2", "file_path":
+                "/repos/redis/deps/hiredis/hiredis.c"},
+            {"sha1": "a3", "file_path":
+                "/repos/redis/src/server.c"},
+        ]
+        doc = emitter.emit(
+            components=[], project_files=files,
+            doc_mapping={}, logfile_hashes={},
+        )
+        names = [p["name"] for p in doc["packages"]]
+        # root + gcc + hiredis + lua = 4
+        self.assertEqual(len(doc["packages"]), 4)
+        self.assertIn("lua", names)
+        self.assertIn("hiredis", names)
+
+        # Check STATIC_LINK relationships
+        static_rels = [
+            r for r in doc["relationships"]
+            if r["relationshipType"] == "STATIC_LINK"
+        ]
+        self.assertEqual(len(static_rels), 2)
+
+        # Vendored packages have LIBRARY purpose
+        for pkg in doc["packages"]:
+            if pkg["name"] in ("lua", "hiredis"):
+                self.assertEqual(
+                    pkg["primaryPackagePurpose"],
+                    "LIBRARY",
+                )
+                self.assertIn(
+                    "Vendored/statically linked",
+                    pkg["comment"],
+                )
+
+    def test_vendored_files_owned_by_lib_package(self):
+        """Vendored source files CONTAINS from lib pkg."""
+        emitter = self._emitter()
+        files = [
+            {"sha1": "a1", "file_path":
+                "/repos/redis/deps/lua/src/lapi.c"},
+            {"sha1": "a2", "file_path":
+                "/repos/redis/src/server.c"},
+        ]
+        doc = emitter.emit(
+            components=[], project_files=files,
+            doc_mapping={}, logfile_hashes={},
+        )
+        # Find lua package ID
+        lua_pkg = [
+            p for p in doc["packages"]
+            if p["name"] == "lua"
+        ][0]
+        lua_id = lua_pkg["SPDXID"]
+
+        # Find CONTAINS rels from lua package
+        lua_contains = [
+            r for r in doc["relationships"]
+            if r["spdxElementId"] == lua_id
+            and r["relationshipType"] == "CONTAINS"
+        ]
+        self.assertEqual(len(lua_contains), 1)
+
+        # server.c should be owned by root
+        root_contains = [
+            r for r in doc["relationships"]
+            if r["spdxElementId"]
+            == "SPDXRef-Package-root"
+            and r["relationshipType"] == "CONTAINS"
+        ]
+        self.assertEqual(len(root_contains), 1)
+
+    def test_no_vendored_files_no_extra_packages(self):
+        """No vendored dirs means no extra packages."""
+        emitter = self._emitter()
+        files = [
+            {"sha1": "a1", "file_path":
+                "/repos/redis/src/server.c"},
+        ]
+        doc = emitter.emit(
+            components=[], project_files=files,
+            doc_mapping={}, logfile_hashes={},
+        )
+        # root + gcc only
+        self.assertEqual(len(doc["packages"]), 2)
+        static_rels = [
+            r for r in doc["relationships"]
+            if r["relationshipType"] == "STATIC_LINK"
+        ]
+        self.assertEqual(len(static_rels), 0)
+
+
 class TestSpdxEmitterPerBinary(unittest.TestCase):
     """Tests for per-binary SPDX generation."""
 
