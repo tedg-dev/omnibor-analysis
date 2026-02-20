@@ -472,6 +472,72 @@ class TestSpdxGenerator(unittest.TestCase):
             self.assertIn(".spdx.json", result)
             self.assertTrue(Path(result).exists())
 
+    def test_generate_renames_all_spdx_json_files(self):
+        """All .spdx-json files get renamed to .spdx.json."""
+        with tempfile.TemporaryDirectory() as td:
+            runner = MagicMock()
+            runner.run.return_value = 0
+            gen = SpdxGenerator(runner)
+            paths = self._setup_repo(td)
+            repo_cfg = {
+                "output_binaries": [
+                    "src/.libs/curl"
+                ],
+            }
+            omnibor = {
+                "sbom_script": "/usr/bin/sbom",
+            }
+
+            # Simulate multiple bomsh_sbom.py outputs
+            spdx_dir = (
+                Path(td) / "output" / "spdx" / "curl"
+            )
+            spdx_dir.mkdir(parents=True)
+            (
+                spdx_dir
+                / "omnibor.curl.syft.spdx-json"
+            ).write_text('{"creationInfo":{}}')
+            (
+                spdx_dir
+                / "curl.syft.spdx-json"
+            ).write_text('{"creationInfo":{}}')
+            (
+                spdx_dir
+                / "libcurl.syft.spdx-json"
+            ).write_text('{"creationInfo":{}}')
+
+            with patch("builtins.print"), \
+                    patch.object(
+                        SpdxGenerator,
+                        "patch_spdx_metadata",
+                    ):
+                result = gen.generate(
+                    "curl", repo_cfg,
+                    paths, omnibor,
+                )
+            self.assertIsNotNone(result)
+
+            # Primary renamed to standard name
+            self.assertTrue(Path(result).exists())
+
+            # Remaining files renamed to .spdx.json
+            remaining = sorted(
+                spdx_dir.glob("*.spdx.json")
+            )
+            names = [f.name for f in remaining]
+            self.assertIn(
+                "curl.syft.spdx.json", names
+            )
+            self.assertIn(
+                "libcurl.syft.spdx.json", names
+            )
+
+            # No .spdx-json files should remain
+            leftover = list(
+                spdx_dir.glob("*.spdx-json")
+            )
+            self.assertEqual(len(leftover), 0)
+
     def test_generate_no_binaries_returns_none(self):
         with tempfile.TemporaryDirectory() as td:
             runner = MagicMock()
