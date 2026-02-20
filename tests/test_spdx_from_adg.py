@@ -1011,6 +1011,35 @@ class TestSubComponentSplitting(unittest.TestCase):
                 cjson_pkg["versionInfo"], "2.1.0"
             )
 
+    def test_split_parent_prefixed_sub_component(
+        self,
+    ):
+        """Sub-components whose prefix starts with
+        parent name are still split (e.g. LUA_BITOP
+        is lua-bitop, not part of lua)."""
+        with tempfile.TemporaryDirectory() as td:
+            lua_dir = Path(td) / "deps" / "lua" / "src"
+            lua_dir.mkdir(parents=True)
+            (lua_dir / "lapi.c").write_text("")
+            (lua_dir / "lua_bit.c").write_text(
+                '#define LUA_BITOP_VERSION'
+                '    "1.0.2"\n'
+            )
+            emitter = self._emitter()
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(lua_dir / "lapi.c")},
+                {"sha1": "a2", "file_path":
+                    str(lua_dir / "lua_bit.c")},
+            ]
+            vendored, own = (
+                emitter._detect_vendored_groups(files)
+            )
+            self.assertIn("lua-bitop", vendored)
+            self.assertEqual(
+                len(vendored["lua-bitop"]), 1
+            )
+
     def test_no_split_when_prefix_matches_parent(
         self,
     ):

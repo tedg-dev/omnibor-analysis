@@ -752,10 +752,11 @@ class SpdxEmitter:
                 "-", "_"
             )
             # Skip if this is the parent lib's own
-            # version define
+            # version define (e.g. LUA_VERSION,
+            # LUA_VERSION_NUM) but NOT a different
+            # library that starts with the parent
+            # name (e.g. LUA_BITOP is lua-bitop)
             if norm == parent_prefix:
-                continue
-            if norm.startswith(parent_prefix + "_"):
                 continue
             # Skip generic names
             if norm in (
