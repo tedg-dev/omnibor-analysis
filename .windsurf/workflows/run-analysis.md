@@ -69,8 +69,9 @@ This downloads:
 2. **Syft baseline** — manifest-based SPDX SBOM for comparison
 3. **Validate deps** — checks `apt_deps` are installed
 4. **Instrumented build** — `bomtrace3 make` intercepts compiler/linker calls
-5. **SPDX generation** — `bomsh_sbom.py` creates SPDX SBOM from ADG data
-6. **SPDX validation** — JSON Schema + semantic validation of generated SPDX
+5a. **SPDX generation (bomsh)** — `bomsh_sbom.py` creates SPDX SBOM from ADG data
+5b. **SPDX generation (ADG)** — per-binary SPDX with vendored version detection via `spdx_from_adg.py`
+6. **SPDX validation** — JSON Schema + semantic validation of all generated SBOMs
 7. **Binary collection** — copies `output_binaries` to `output/binaries/<repo>/`
 8. **Docs** — timestamped build log and runtime metrics
 
@@ -81,6 +82,7 @@ This downloads:
 | Output binaries | `output/binaries/<repo>/<ts>/` |
 | OmniBOR ADG | `output/omnibor/<repo>/` |
 | SPDX SBOM (OmniBOR) | `output/spdx/<repo>/<repo>_omnibor_<ts>.spdx.json` |
+| SPDX SBOM (ADG) | `output/spdx/<repo>/<binary>_adg.spdx.json` |
 | SPDX SBOM (Syft) | `output/spdx/<repo>/<repo>_syft_<ts>.spdx.json` |
 | Build log | `docs/<repo>/<ts>_build.md` |
 | Runtime metrics | `docs/runtime/<ts>_<repo>_runtime.md` |
