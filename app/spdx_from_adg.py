@@ -496,8 +496,6 @@ class SpdxEmitter:
         root_pkg = {
             "SPDXID": root_id,
             "name": self.binary_name,
-            "versionInfo": self.repo_version,
-            "supplier": "NOASSERTION",
             "downloadLocation": "NOASSERTION",
             "filesAnalyzed": True,
             "primaryPackagePurpose": root_purpose,
@@ -509,6 +507,10 @@ class SpdxEmitter:
                 f"{self.gcc_version}"
             ),
         }
+        if self.repo_version:
+            root_pkg["versionInfo"] = (
+                self.repo_version
+            )
 
         # Add OmniBOR ref for root binary
         for bin_path, sha1 in (
@@ -563,28 +565,17 @@ class SpdxEmitter:
                 "dpkg_packages", []
             )
 
+            dl = (
+                comp["homepage"]
+                if comp.get("homepage")
+                and comp["homepage"]
+                != "NOASSERTION"
+                else "NOASSERTION"
+            )
             pkg = {
                 "SPDXID": pkg_id,
                 "name": comp["name"],
-                "versionInfo": comp["version"],
-                "supplier": (
-                    f"Organization: "
-                    f"{comp['supplier']}"
-                    if comp.get("supplier")
-                    and comp["supplier"]
-                    != "NOASSERTION"
-                    else "NOASSERTION"
-                ),
-                "downloadLocation": (
-                    comp["homepage"]
-                    if comp.get("homepage")
-                    and comp["homepage"]
-                    != "NOASSERTION"
-                    else "NOASSERTION"
-                ),
-                "homepage": comp.get(
-                    "homepage", "NOASSERTION"
-                ),
+                "downloadLocation": dl,
                 "filesAnalyzed": False,
                 "primaryPackagePurpose": "LIBRARY",
                 "externalRefs": [],
@@ -616,6 +607,21 @@ class SpdxEmitter:
                     "referenceLocator":
                         comp["cpe23"],
                 })
+
+            # Add optional fields only when known
+            if comp.get("version"):
+                pkg["versionInfo"] = comp["version"]
+            supplier = comp.get("supplier", "")
+            if (
+                supplier
+                and supplier != "NOASSERTION"
+            ):
+                pkg["supplier"] = (
+                    f"Organization: {supplier}"
+                )
+            hp = comp.get("homepage", "")
+            if hp and hp != "NOASSERTION":
+                pkg["homepage"] = hp
 
             doc["packages"].append(pkg)
 
@@ -689,8 +695,6 @@ class SpdxEmitter:
             pkg = {
                 "SPDXID": pkg_id,
                 "name": lib_name,
-                "versionInfo": "NOASSERTION",
-                "supplier": "NOASSERTION",
                 "downloadLocation": "NOASSERTION",
                 "filesAnalyzed": True,
                 "primaryPackagePurpose": "LIBRARY",
