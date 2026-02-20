@@ -885,6 +885,194 @@ class TestSpdxEmitterVendored(unittest.TestCase):
         self.assertEqual(len(static_rels), 0)
 
 
+class TestSubComponentSplitting(unittest.TestCase):
+    """Tests for sub-component detection in vendored dirs."""
+
+    def _emitter(self):
+        return SpdxEmitter(
+            repo_name="redis",
+            repo_version="7.2.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name="redis-server",
+        )
+
+    def test_split_sub_component_by_version_define(
+        self,
+    ):
+        """Files with own #define VERSION split out."""
+        with tempfile.TemporaryDirectory() as td:
+            lua_dir = Path(td) / "deps" / "lua" / "src"
+            lua_dir.mkdir(parents=True)
+            # Parent lib file
+            (lua_dir / "lapi.c").write_text(
+                '#define LUA_VERSION "Lua 5.1"\n'
+            )
+            # Sub-component with own version
+            (lua_dir / "lua_cjson.c").write_text(
+                '#define CJSON_VERSION "2.1.0"\n'
+                "int cjson_init() {}\n"
+            )
+            emitter = self._emitter()
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(lua_dir / "lapi.c")},
+                {"sha1": "a2", "file_path":
+                    str(lua_dir / "lua_cjson.c")},
+            ]
+            vendored, own = (
+                emitter._detect_vendored_groups(files)
+            )
+            self.assertIn("lua-cjson", vendored)
+            self.assertEqual(
+                len(vendored["lua-cjson"]), 1
+            )
+            # Parent still has its file
+            self.assertIn("lua", vendored)
+            self.assertEqual(
+                len(vendored["lua"]), 1
+            )
+
+    def test_sub_component_gets_spdx_package(self):
+        """Sub-components become SPDX packages."""
+        with tempfile.TemporaryDirectory() as td:
+            lua_dir = Path(td) / "deps" / "lua" / "src"
+            lua_dir.mkdir(parents=True)
+            (lua_dir / "lapi.c").write_text(
+                '#define LUA_VERSION "Lua 5.1"\n'
+            )
+            (lua_dir / "lua_cjson.c").write_text(
+                '#define CJSON_VERSION "2.1.0"\n'
+            )
+            (lua_dir / "lua_cmsgpack.c").write_text(
+                '#define LUACMSGPACK_VERSION '
+                '"lua-cmsgpack 0.4.0"\n'
+            )
+            emitter = self._emitter()
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(lua_dir / "lapi.c")},
+                {"sha1": "a2", "file_path":
+                    str(lua_dir / "lua_cjson.c")},
+                {"sha1": "a3", "file_path":
+                    str(lua_dir / "lua_cmsgpack.c")},
+            ]
+            doc = emitter.emit(
+                components=[],
+                project_files=files,
+                doc_mapping={},
+                logfile_hashes={},
+            )
+            names = [
+                p["name"] for p in doc["packages"]
+            ]
+            self.assertIn("lua-cjson", names)
+            self.assertIn(
+                "lua-luacmsgpack", names
+            )
+            self.assertIn("lua", names)
+
+            # Sub-components get STATIC_LINK
+            static_rels = [
+                r for r in doc["relationships"]
+                if r["relationshipType"]
+                == "STATIC_LINK"
+            ]
+            # lua + lua-cjson + lua-luacmsgpack = 3
+            self.assertEqual(len(static_rels), 3)
+
+    def test_sub_component_version_detected(self):
+        """Sub-component version is in SPDX pkg."""
+        with tempfile.TemporaryDirectory() as td:
+            lua_dir = Path(td) / "deps" / "lua" / "src"
+            lua_dir.mkdir(parents=True)
+            (lua_dir / "lapi.c").write_text("")
+            (lua_dir / "lua_cjson.c").write_text(
+                '#define CJSON_VERSION "2.1.0"\n'
+            )
+            emitter = self._emitter()
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(lua_dir / "lapi.c")},
+                {"sha1": "a2", "file_path":
+                    str(lua_dir / "lua_cjson.c")},
+            ]
+            doc = emitter.emit(
+                components=[],
+                project_files=files,
+                doc_mapping={},
+                logfile_hashes={},
+            )
+            cjson_pkg = [
+                p for p in doc["packages"]
+                if p["name"] == "lua-cjson"
+            ][0]
+            self.assertEqual(
+                cjson_pkg["versionInfo"], "2.1.0"
+            )
+
+    def test_no_split_when_prefix_matches_parent(
+        self,
+    ):
+        """Parent's own VERSION define is not split."""
+        with tempfile.TemporaryDirectory() as td:
+            lua_dir = Path(td) / "deps" / "lua" / "src"
+            lua_dir.mkdir(parents=True)
+            (lua_dir / "lua.h").write_text(
+                '#define LUA_RELEASE "Lua 5.1.5"\n'
+                '#define LUA_VERSION_NUM 501\n'
+            )
+            emitter = self._emitter()
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(lua_dir / "lua.h")},
+            ]
+            vendored, own = (
+                emitter._detect_vendored_groups(files)
+            )
+            # Should stay as "lua", no sub-split
+            self.assertIn("lua", vendored)
+            self.assertEqual(len(vendored), 1)
+
+    def test_related_files_follow_sub_component(
+        self,
+    ):
+        """Header files matching sub-component name
+        are assigned to the sub-component group."""
+        with tempfile.TemporaryDirectory() as td:
+            lua_dir = Path(td) / "deps" / "lua" / "src"
+            lua_dir.mkdir(parents=True)
+            (lua_dir / "lapi.c").write_text("")
+            (lua_dir / "lua_cjson.c").write_text(
+                '#define CJSON_VERSION "2.1.0"\n'
+            )
+            (lua_dir / "strbuf.h").write_text(
+                "/* string buffer for cjson */\n"
+            )
+            emitter = self._emitter()
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(lua_dir / "lapi.c")},
+                {"sha1": "a2", "file_path":
+                    str(lua_dir / "lua_cjson.c")},
+                {"sha1": "a3", "file_path":
+                    str(lua_dir / "strbuf.h")},
+            ]
+            vendored, own = (
+                emitter._detect_vendored_groups(files)
+            )
+            # strbuf.h doesn't match "cjson" prefix,
+            # so stays with lua parent
+            self.assertIn("lua-cjson", vendored)
+            self.assertEqual(
+                len(vendored["lua-cjson"]), 1
+            )
+            self.assertIn("lua", vendored)
+            self.assertEqual(
+                len(vendored["lua"]), 2
+            )
+
+
 class TestVendoredVersionDetector(unittest.TestCase):
     """Tests for VendoredVersionDetector."""
 
