@@ -576,6 +576,7 @@ class SpdxEmitter:
             binary_name or repo_name
         )
         self._spdx_id_counter = 0
+        self._sub_versions = {}
 
     def _next_spdx_id(self, prefix="Package"):
         """Generate unique SPDX identifier."""
@@ -596,13 +597,28 @@ class SpdxEmitter:
         "/thirdparty/", "/external/", "/contrib/",
     )
 
+    # Regex for #define PREFIX_VERSION "x.y.z"
+    # Captures (prefix, version_string)
+    _SUB_VERSION_RE = re.compile(
+        r'#define\s+(\w+?)_VERSION\s+'
+        r'"[^"]*?(\d+\.\d+(?:\.\d+)?)'
+    )
+
     def _detect_vendored_groups(self, project_files):
         """Group source files by vendored library.
 
         Scans project_files for paths matching
-        VENDORED_DIRS patterns. Returns:
+        VENDORED_DIRS patterns, then splits out
+        embedded sub-components that declare their
+        own version identifiers.
+
+        Returns:
           vendored: dict[lib_name] -> list[artifact]
           own: list[artifact]  (non-vendored)
+
+        Side-effect: populates self._sub_versions
+        with {lib_name: version} for sub-components
+        whose version was found during splitting.
         """
         vendored = {}
         own = []
@@ -625,7 +641,138 @@ class SpdxEmitter:
                     break
             if not matched:
                 own.append(art)
+
+        # Split out sub-components
+        vendored, self._sub_versions = (
+            self._split_sub_components(vendored)
+        )
         return vendored, own
+
+    def _split_sub_components(self, vendored):
+        """Split embedded sub-libraries out of
+        vendored groups.
+
+        Scans .c files in each vendored group for
+        #define PREFIX_VERSION "x.y.z" where PREFIX
+        does not match the parent library name.
+        Files whose basename matches the sub-component
+        prefix are moved to a new group.
+
+        Example: deps/lua/src/lua_cjson.c defines
+        CJSON_VERSION "2.1.0" -> split into a new
+        "lua-cjson" group.
+
+        Returns:
+            (result, versions) where result is the
+            updated vendored dict and versions is
+            {full_name: version} for sub-components.
+        """
+        result = {}
+        versions = {}
+        for lib_name, arts in vendored.items():
+            parent_prefix = (
+                lib_name.upper()
+                .replace("-", "_")
+                .replace(".", "_")
+            )
+            sub_map = {}  # key -> (name, ver, [arts])
+            remaining = []
+
+            for art in arts:
+                fp = art["file_path"]
+                ext = Path(fp).suffix.lower()
+                if ext not in (".c", ".h"):
+                    remaining.append(art)
+                    continue
+
+                sub = self._detect_sub_component(
+                    fp, parent_prefix
+                )
+                if sub:
+                    sub_name, sub_ver = sub
+                    key = sub_name.lower()
+                    if key not in sub_map:
+                        sub_map[key] = (
+                            sub_name, sub_ver, []
+                        )
+                    sub_map[key][2].append(art)
+                else:
+                    remaining.append(art)
+
+            # Assign remaining files that match a
+            # sub-component by basename prefix
+            still_remaining = []
+            for art in remaining:
+                basename = Path(
+                    art["file_path"]
+                ).stem.lower()
+                assigned = False
+                for key in sub_map:
+                    if key in basename:
+                        sub_map[key][2].append(art)
+                        assigned = True
+                        break
+                if not assigned:
+                    still_remaining.append(art)
+
+            # Keep parent group with remaining files
+            if still_remaining:
+                result[lib_name] = still_remaining
+
+            # Add sub-component groups
+            for key, (name, ver, sub_arts) in (
+                sub_map.items()
+            ):
+                full_name = f"{lib_name}-{name}"
+                result[full_name] = sub_arts
+                if ver:
+                    versions[full_name] = ver
+
+        return result, versions
+
+    def _detect_sub_component(
+        self, file_path, parent_prefix
+    ):
+        """Check if a source file defines its own
+        version distinct from the parent library.
+
+        Returns (sub_name, version) or None.
+        """
+        try:
+            text = Path(file_path).read_text(
+                errors="replace"
+            )
+        except OSError:
+            return None
+
+        for m in self._SUB_VERSION_RE.finditer(text):
+            prefix = m.group(1)
+            version = m.group(2)
+            norm = prefix.upper().replace(
+                "-", "_"
+            )
+            # Skip if this is the parent lib's own
+            # version define
+            if norm == parent_prefix:
+                continue
+            if norm.startswith(parent_prefix + "_"):
+                continue
+            # Skip generic names
+            if norm in (
+                "VERSION", "LIB", "PACKAGE",
+                "MODULE",
+            ):
+                continue
+            # Derive readable name from prefix
+            name = prefix.lower().replace("_", "-")
+            # Strip leading "lua-" etc. if parent
+            # is already in the name
+            lp = parent_prefix.lower()
+            if name.startswith(lp + "-"):
+                name = name[len(lp) + 1:]
+            return (name, version)
+
+        return None
 
     def emit(
         self, components, project_files,
@@ -923,6 +1070,13 @@ class SpdxEmitter:
             ver = ver_detector.detect(
                 lib_name, file_paths
             )
+            # Fallback: version found during
+            # sub-component splitting
+            if not ver:
+                sub_vers = getattr(
+                    self, "_sub_versions", {}
+                )
+                ver = sub_vers.get(lib_name)
             if ver:
                 pkg["versionInfo"] = ver
 
