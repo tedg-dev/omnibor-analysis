@@ -293,8 +293,8 @@ class TestComponentResolver(unittest.TestCase):
             )
             self.assertEqual(len(components), 2)
             names = [c["name"] for c in components]
-            self.assertIn("openssl", names)
-            self.assertIn("zlib", names)
+            self.assertIn("libssl3", names)
+            self.assertIn("zlib1g", names)
 
     def test_direct_flag(self):
         with tempfile.TemporaryDirectory() as td:
@@ -310,8 +310,8 @@ class TestComponentResolver(unittest.TestCase):
             components = (
                 resolver.resolve_dynamic_components()
             )
-            ssl = [c for c in components if c["name"] == "openssl"][0]
-            zlib = [c for c in components if c["name"] == "zlib"][0]
+            ssl = [c for c in components if c["name"] == "libssl3"][0]
+            zlib = [c for c in components if c["name"] == "zlib1g"][0]
             # openssl has one direct soname
             self.assertTrue(ssl["direct"])
             self.assertTrue(zlib["direct"])
@@ -330,7 +330,7 @@ class TestComponentResolver(unittest.TestCase):
             components = (
                 resolver.resolve_dynamic_components()
             )
-            ssl = [c for c in components if c["name"] == "openssl"][0]
+            ssl = [c for c in components if c["name"] == "libssl3"][0]
             self.assertEqual(len(ssl["sonames"]), 2)
             self.assertIn("libssl.so.3", ssl["sonames"])
             self.assertIn("libcrypto.so.3", ssl["sonames"])
@@ -349,7 +349,7 @@ class TestComponentResolver(unittest.TestCase):
             components = (
                 resolver.resolve_dynamic_components()
             )
-            ssl = [c for c in components if c["name"] == "openssl"][0]
+            ssl = [c for c in components if c["name"] == "libssl3"][0]
             self.assertIn("pkg:deb/ubuntu/", ssl["purl"])
             self.assertIn("distro=ubuntu-22.04", ssl["purl"])
             self.assertIn("arch=amd64", ssl["purl"])
@@ -368,10 +368,11 @@ class TestComponentResolver(unittest.TestCase):
             components = (
                 resolver.resolve_dynamic_components()
             )
-            ssl = [c for c in components if c["name"] == "openssl"][0]
+            ssl = [c for c in components if c["name"] == "libssl3"][0]
             self.assertTrue(
                 ssl["cpe23"].startswith("cpe:2.3:a:")
             )
+            # CPE uses source package name
             self.assertIn("openssl", ssl["cpe23"])
             self.assertIn("3.0.2", ssl["cpe23"])
 
@@ -598,6 +599,48 @@ class TestSpdxEmitter(unittest.TestCase):
             if r["relationshipType"] == "DYNAMIC_LINK"
         ]
         self.assertEqual(len(dyn_rels), 1)
+
+    def test_emit_static_only_excludes_dynamic(self):
+        """static_only=True excludes all dynamic deps."""
+        emitter = SpdxEmitter(
+            repo_name="curl",
+            repo_version="8.19.0",
+            distro="Ubuntu 22.04",
+            gcc_version="gcc 11.4.0",
+            binary_name="curl",
+        )
+        components = [
+            {
+                "name": "libc6",
+                "version": "2.35",
+                "supplier": "Ubuntu",
+                "homepage": "NOASSERTION",
+                "dpkg_packages": ["libc6"],
+                "architecture": "amd64",
+                "purl": "pkg:deb/ubuntu/libc6@2.35",
+                "cpe23": "cpe:2.3:a:glibc:glibc:2.35:*:*:*:*:*:*:*",
+                "sonames": ["libc.so.6"],
+                "direct": True,
+            },
+        ]
+        doc = emitter.emit(
+            components=components,
+            project_files=[],
+            doc_mapping={},
+            logfile_hashes={},
+            static_only=True,
+        )
+        # Root + gcc only = 2 (libc6 excluded)
+        self.assertEqual(len(doc["packages"]), 2)
+        names = [p["name"] for p in doc["packages"]]
+        self.assertNotIn("libc6", names)
+        # No DYNAMIC_LINK relationships
+        dyn_rels = [
+            r for r in doc["relationships"]
+            if r["relationshipType"]
+            == "DYNAMIC_LINK"
+        ]
+        self.assertEqual(len(dyn_rels), 0)
 
     def test_emit_with_omnibor_ref(self):
         sha = "a" * 40
