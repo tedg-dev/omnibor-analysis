@@ -1154,6 +1154,19 @@ class AdgSpdxGenerator:
             f"{file_count} files, "
             f"{rel_count} relationships)"
         )
+
+        # Generate HTML visualization
+        try:
+            from spdx_visualize import generate_html
+            html_path = str(
+                out.with_suffix(".html")
+            )
+            generate_html(doc, html_path)
+        except Exception as e:
+            print(
+                f"[WARN] Visualization failed: {e}"
+            )
+
         return str(out)
 
 

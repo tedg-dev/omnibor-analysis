@@ -1,0 +1,526 @@
+#!/usr/bin/env python3
+"""Generate an interactive HTML dependency graph from an SPDX JSON file.
+
+Reads an SPDX 2.3 JSON document and produces a standalone HTML file
+with a D3.js force-directed graph, color-coded by relationship type:
+  - STATIC_LINK (vendored/compiled-in)
+  - DYNAMIC_LINK (runtime shared libraries)
+  - BUILD_TOOL_OF (compiler/toolchain)
+  - CONTAINS (source files, shown as counts)
+
+Usage:
+    python3 spdx_visualize.py input.spdx.json [-o output.html]
+"""
+
+import argparse
+import json
+import html
+from pathlib import Path
+
+
+def extract_graph(doc):
+    """Extract nodes and edges from SPDX document.
+
+    Returns:
+        nodes: list of {id, name, version, purpose, group, fileCount}
+        edges: list of {source, target, type}
+        file_counts: dict of SPDXID -> count of CONTAINS relationships
+    """
+    pkg_map = {}
+    for p in doc.get("packages", []):
+        pkg_map[p["SPDXID"]] = {
+            "id": p["SPDXID"],
+            "name": p.get("name", "unknown"),
+            "version": p.get("versionInfo", ""),
+            "purpose": p.get(
+                "primaryPackagePurpose", ""
+            ),
+            "comment": p.get("comment", ""),
+        }
+
+    # Count CONTAINS relationships per package
+    file_counts = {}
+    for r in doc.get("relationships", []):
+        if r["relationshipType"] == "CONTAINS":
+            src = r["spdxElementId"]
+            file_counts[src] = (
+                file_counts.get(src, 0) + 1
+            )
+
+    # Classify packages into groups
+    rels = doc.get("relationships", [])
+    static_targets = set()
+    dynamic_targets = set()
+    build_sources = set()
+
+    for r in rels:
+        rt = r["relationshipType"]
+        if rt == "STATIC_LINK":
+            static_targets.add(
+                r["relatedSpdxElement"]
+            )
+        elif rt == "DYNAMIC_LINK":
+            dynamic_targets.add(
+                r["relatedSpdxElement"]
+            )
+        elif rt == "BUILD_TOOL_OF":
+            build_sources.add(r["spdxElementId"])
+
+    nodes = []
+    for spdx_id, info in pkg_map.items():
+        if spdx_id in static_targets:
+            group = "static"
+        elif spdx_id in dynamic_targets:
+            group = "dynamic"
+        elif spdx_id in build_sources:
+            group = "build"
+        elif info["purpose"] == "APPLICATION":
+            group = "root"
+        else:
+            group = "other"
+
+        nodes.append({
+            "id": spdx_id,
+            "name": info["name"],
+            "version": info["version"],
+            "purpose": info["purpose"],
+            "group": group,
+            "comment": info["comment"],
+            "fileCount": file_counts.get(
+                spdx_id, 0
+            ),
+        })
+
+    # Edges: only package-to-package (skip CONTAINS, DESCRIBES)
+    edges = []
+    for r in rels:
+        rt = r["relationshipType"]
+        src = r["spdxElementId"]
+        tgt = r["relatedSpdxElement"]
+        if rt in (
+            "STATIC_LINK", "DYNAMIC_LINK",
+            "BUILD_TOOL_OF",
+        ):
+            if src in pkg_map and tgt in pkg_map:
+                edges.append({
+                    "source": src,
+                    "target": tgt,
+                    "type": rt,
+                })
+
+    return nodes, edges
+
+
+def generate_html(doc, output_path):
+    """Generate standalone HTML visualization."""
+    nodes, edges = extract_graph(doc)
+
+    doc_name = doc.get("name", "SPDX Document")
+    created = doc.get(
+        "creationInfo", {}
+    ).get("created", "")
+
+    graph_data = json.dumps({
+        "nodes": nodes,
+        "links": edges,
+    })
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SPDX Dependency Graph — {html.escape(doc_name)}</title>
+<style>
+  * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+  body {{
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: #0f1117;
+    color: #e0e0e0;
+    overflow: hidden;
+  }}
+  #header {{
+    position: fixed; top: 0; left: 0; right: 0;
+    background: rgba(15, 17, 23, 0.95);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid #2a2d35;
+    padding: 12px 24px;
+    z-index: 100;
+    display: flex;
+    align-items: center;
+    gap: 24px;
+  }}
+  #header h1 {{
+    font-size: 16px;
+    font-weight: 600;
+    color: #fff;
+    white-space: nowrap;
+  }}
+  #header .meta {{
+    font-size: 12px;
+    color: #888;
+  }}
+  #legend {{
+    position: fixed; top: 60px; right: 20px;
+    background: rgba(22, 24, 32, 0.95);
+    backdrop-filter: blur(8px);
+    border: 1px solid #2a2d35;
+    border-radius: 8px;
+    padding: 16px;
+    z-index: 100;
+    font-size: 13px;
+    min-width: 200px;
+  }}
+  #legend h3 {{
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 10px;
+    color: #fff;
+  }}
+  .legend-item {{
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 6px;
+  }}
+  .legend-dot {{
+    width: 12px; height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }}
+  .legend-line {{
+    width: 24px; height: 2px;
+    flex-shrink: 0;
+  }}
+  #tooltip {{
+    position: fixed;
+    background: rgba(22, 24, 32, 0.97);
+    border: 1px solid #3a3d45;
+    border-radius: 8px;
+    padding: 12px 16px;
+    font-size: 13px;
+    pointer-events: none;
+    opacity: 0;
+    transition: opacity 0.15s;
+    z-index: 200;
+    max-width: 350px;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.4);
+  }}
+  #tooltip .tt-name {{
+    font-weight: 600;
+    font-size: 14px;
+    color: #fff;
+    margin-bottom: 4px;
+  }}
+  #tooltip .tt-row {{
+    color: #aaa;
+    margin-top: 2px;
+  }}
+  #tooltip .tt-row span {{
+    color: #ddd;
+  }}
+  #graph {{ width: 100vw; height: 100vh; }}
+  svg {{ display: block; }}
+
+  /* Edge styles */
+  .link-STATIC_LINK {{ stroke: #4ecdc4; }}
+  .link-DYNAMIC_LINK {{ stroke: #ff6b6b; }}
+  .link-BUILD_TOOL_OF {{ stroke: #ffd93d; }}
+</style>
+</head>
+<body>
+
+<div id="header">
+  <h1>SPDX Dependency Graph</h1>
+  <span class="meta">{html.escape(doc_name)} &mdash; {html.escape(created)}</span>
+</div>
+
+<div id="legend">
+  <h3>Packages</h3>
+  <div class="legend-item">
+    <div class="legend-dot" style="background:#7c5cfc"></div>
+    <span>Root binary</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="background:#4ecdc4"></div>
+    <span>Static / vendored</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="background:#ff6b6b"></div>
+    <span>Dynamic (runtime)</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-dot" style="background:#ffd93d"></div>
+    <span>Build tool</span>
+  </div>
+
+  <h3 style="margin-top:14px">Relationships</h3>
+  <div class="legend-item">
+    <div class="legend-line" style="background:#4ecdc4"></div>
+    <span>STATIC_LINK</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-line" style="background:#ff6b6b"></div>
+    <span>DYNAMIC_LINK</span>
+  </div>
+  <div class="legend-item">
+    <div class="legend-line" style="background:#ffd93d; height:2px; border-top:1px dashed #ffd93d; background:none;"></div>
+    <span>BUILD_TOOL_OF</span>
+  </div>
+</div>
+
+<div id="tooltip">
+  <div class="tt-name"></div>
+  <div class="tt-details"></div>
+</div>
+
+<div id="graph"></div>
+
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script>
+const data = {graph_data};
+
+const colors = {{
+  root: '#7c5cfc',
+  static: '#4ecdc4',
+  dynamic: '#ff6b6b',
+  build: '#ffd93d',
+  other: '#888',
+}};
+
+const linkColors = {{
+  'STATIC_LINK': '#4ecdc4',
+  'DYNAMIC_LINK': '#ff6b6b',
+  'BUILD_TOOL_OF': '#ffd93d',
+}};
+
+const width = window.innerWidth;
+const height = window.innerHeight;
+
+const svg = d3.select('#graph')
+  .append('svg')
+  .attr('width', width)
+  .attr('height', height);
+
+// Zoom
+const g = svg.append('g');
+svg.call(d3.zoom()
+  .scaleExtent([0.2, 5])
+  .on('zoom', (e) => g.attr('transform', e.transform)));
+
+// Arrow markers
+const defs = svg.append('defs');
+Object.entries(linkColors).forEach(([type, color]) => {{
+  defs.append('marker')
+    .attr('id', 'arrow-' + type)
+    .attr('viewBox', '0 -5 10 10')
+    .attr('refX', 28)
+    .attr('refY', 0)
+    .attr('markerWidth', 8)
+    .attr('markerHeight', 8)
+    .attr('orient', 'auto')
+    .append('path')
+    .attr('d', 'M0,-4L10,0L0,4')
+    .attr('fill', color);
+}});
+
+// Simulation
+const simulation = d3.forceSimulation(data.nodes)
+  .force('link', d3.forceLink(data.links)
+    .id(d => d.id)
+    .distance(d => d.type === 'BUILD_TOOL_OF' ? 180 : 140))
+  .force('charge', d3.forceManyBody().strength(-600))
+  .force('center', d3.forceCenter(width / 2, height / 2))
+  .force('collision', d3.forceCollide().radius(50));
+
+// Links
+const link = g.append('g')
+  .selectAll('line')
+  .data(data.links)
+  .join('line')
+  .attr('stroke', d => linkColors[d.type] || '#555')
+  .attr('stroke-width', d => d.type === 'STATIC_LINK' ? 2 : 1.5)
+  .attr('stroke-dasharray', d => d.type === 'BUILD_TOOL_OF' ? '6,4' : null)
+  .attr('stroke-opacity', 0.6)
+  .attr('marker-end', d => 'url(#arrow-' + d.type + ')');
+
+// Link labels
+const linkLabel = g.append('g')
+  .selectAll('text')
+  .data(data.links)
+  .join('text')
+  .attr('font-size', 9)
+  .attr('fill', d => linkColors[d.type] || '#555')
+  .attr('fill-opacity', 0.7)
+  .attr('text-anchor', 'middle')
+  .text(d => d.type.replace(/_/g, ' '));
+
+// Nodes
+const node = g.append('g')
+  .selectAll('g')
+  .data(data.nodes)
+  .join('g')
+  .call(d3.drag()
+    .on('start', dragstarted)
+    .on('drag', dragged)
+    .on('end', dragended));
+
+// Node circles — size by file count
+node.append('circle')
+  .attr('r', d => {{
+    if (d.group === 'root') return 24;
+    if (d.fileCount > 50) return 18;
+    if (d.fileCount > 10) return 14;
+    return 12;
+  }})
+  .attr('fill', d => colors[d.group] || colors.other)
+  .attr('stroke', '#fff')
+  .attr('stroke-width', d => d.group === 'root' ? 2.5 : 1.5)
+  .attr('stroke-opacity', 0.3);
+
+// Glow for root
+node.filter(d => d.group === 'root')
+  .append('circle')
+  .attr('r', 32)
+  .attr('fill', 'none')
+  .attr('stroke', colors.root)
+  .attr('stroke-width', 1)
+  .attr('stroke-opacity', 0.2);
+
+// Labels
+node.append('text')
+  .attr('dy', d => {{
+    if (d.group === 'root') return 38;
+    if (d.fileCount > 50) return 30;
+    return 26;
+  }})
+  .attr('text-anchor', 'middle')
+  .attr('font-size', d => d.group === 'root' ? 13 : 11)
+  .attr('font-weight', d => d.group === 'root' ? 700 : 500)
+  .attr('fill', '#e0e0e0')
+  .text(d => d.name);
+
+// Version labels
+node.filter(d => d.version)
+  .append('text')
+  .attr('dy', d => {{
+    if (d.group === 'root') return 52;
+    if (d.fileCount > 50) return 43;
+    return 39;
+  }})
+  .attr('text-anchor', 'middle')
+  .attr('font-size', 10)
+  .attr('fill', '#888')
+  .text(d => d.version);
+
+// File count badges
+node.filter(d => d.fileCount > 0)
+  .append('text')
+  .attr('dy', 4)
+  .attr('text-anchor', 'middle')
+  .attr('font-size', 9)
+  .attr('font-weight', 600)
+  .attr('fill', '#fff')
+  .text(d => d.fileCount);
+
+// Tooltip
+const tooltip = d3.select('#tooltip');
+
+node.on('mouseover', (event, d) => {{
+  const rows = [];
+  if (d.version) rows.push('<div class="tt-row">Version: <span>' + d.version + '</span></div>');
+  rows.push('<div class="tt-row">Purpose: <span>' + d.purpose + '</span></div>');
+  rows.push('<div class="tt-row">Group: <span>' + d.group + '</span></div>');
+  if (d.fileCount) rows.push('<div class="tt-row">Source files: <span>' + d.fileCount + '</span></div>');
+  if (d.comment) rows.push('<div class="tt-row" style="margin-top:6px;font-size:11px;color:#777">' + d.comment + '</div>');
+
+  tooltip.select('.tt-name').text(d.name);
+  tooltip.select('.tt-details').html(rows.join(''));
+  tooltip.style('opacity', 1)
+    .style('left', (event.clientX + 16) + 'px')
+    .style('top', (event.clientY - 10) + 'px');
+}})
+.on('mousemove', (event) => {{
+  tooltip.style('left', (event.clientX + 16) + 'px')
+    .style('top', (event.clientY - 10) + 'px');
+}})
+.on('mouseout', () => {{
+  tooltip.style('opacity', 0);
+}});
+
+// Tick
+simulation.on('tick', () => {{
+  link
+    .attr('x1', d => d.source.x)
+    .attr('y1', d => d.source.y)
+    .attr('x2', d => d.target.x)
+    .attr('y2', d => d.target.y);
+
+  linkLabel
+    .attr('x', d => (d.source.x + d.target.x) / 2)
+    .attr('y', d => (d.source.y + d.target.y) / 2 - 6);
+
+  node.attr('transform', d => 'translate(' + d.x + ',' + d.y + ')');
+}});
+
+function dragstarted(event, d) {{
+  if (!event.active) simulation.alphaTarget(0.3).restart();
+  d.fx = d.x; d.fy = d.y;
+}}
+function dragged(event, d) {{
+  d.fx = event.x; d.fy = event.y;
+}}
+function dragended(event, d) {{
+  if (!event.active) simulation.alphaTarget(0);
+  d.fx = null; d.fy = null;
+}}
+</script>
+</body>
+</html>"""
+
+    out = Path(output_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(html_content)
+    print(f"[OK] Visualization: {out}")
+    print(
+        f"     {len(nodes)} packages, "
+        f"{len(edges)} relationships"
+    )
+    return str(out)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description=(
+            "Generate interactive HTML dependency "
+            "graph from SPDX JSON"
+        ),
+    )
+    ap.add_argument(
+        "input",
+        help="Path to SPDX 2.3 JSON file",
+    )
+    ap.add_argument(
+        "-o", "--output",
+        default=None,
+        help=(
+            "Output HTML file path "
+            "(default: <input>.html)"
+        ),
+    )
+    args = ap.parse_args()
+
+    doc = json.loads(Path(args.input).read_text())
+
+    output = args.output
+    if not output:
+        inp = Path(args.input)
+        output = str(
+            inp.parent / (inp.stem + ".html")
+        )
+
+    generate_html(doc, output)
+
+
+if __name__ == "__main__":
+    main()

@@ -676,6 +676,22 @@ class SpdxGenerator:
                     f"{new_name.name}"
                 )
 
+        # Generate HTML visualization
+        try:
+            import json as _viz_json
+            from spdx_visualize import generate_html
+            doc = _viz_json.loads(
+                spdx_file.read_text()
+            )
+            html_path = str(
+                spdx_file.with_suffix(".html")
+            )
+            generate_html(doc, html_path)
+        except Exception as e:
+            print(
+                f"[WARN] Visualization failed: {e}"
+            )
+
         return str(spdx_file)
 
 
