@@ -283,7 +283,8 @@ class ComponentResolver:
             cpe_ver = self._clean_version(version)
 
             comp = {
-                "name": source,
+                "name": dpkg_pkg,
+                "source": source,
                 "version": version,
                 "supplier": meta.get(
                     "Maintainer", "NOASSERTION"
@@ -630,6 +631,7 @@ class SpdxEmitter:
         self, components, project_files,
         doc_mapping, logfile_hashes,
         direct_only=False,
+        static_only=False,
     ):
         """Generate SPDX 2.3 JSON dict.
 
@@ -642,6 +644,10 @@ class SpdxEmitter:
                 dependencies (exclude transitive).
                 Use for two-tier SBOMs where transitive
                 deps belong to a downstream SBOM.
+            static_only: if True, omit dynamically linked
+                library packages. Only include the root
+                binary, vendored/static libs, and the
+                build tool.
 
         Returns:
             dict: complete SPDX 2.3 JSON document
@@ -739,94 +745,101 @@ class SpdxEmitter:
         })
 
         # --- Dynamic library packages ---
-        if direct_only:
-            components = [
-                c for c in components
-                if c.get("direct")
-            ]
+        if not static_only:
+            if direct_only:
+                components = [
+                    c for c in components
+                    if c.get("direct")
+                ]
 
-        for comp in components:
-            safe_name = self._sanitize_spdx_id(
-                comp["name"]
-            )
-            pkg_id = self._next_spdx_id(safe_name)
-
-            linkage = (
-                "direct" if comp.get("direct")
-                else "transitive"
-            )
-            sonames = comp.get("sonames", [])
-            dpkg_pkgs = comp.get(
-                "dpkg_packages", []
-            )
-
-            dl = (
-                comp["homepage"]
-                if comp.get("homepage")
-                and comp["homepage"]
-                != "NOASSERTION"
-                else "NOASSERTION"
-            )
-            pkg = {
-                "SPDXID": pkg_id,
-                "name": comp["name"],
-                "downloadLocation": dl,
-                "filesAnalyzed": False,
-                "primaryPackagePurpose": "LIBRARY",
-                "externalRefs": [],
-                "comment": (
-                    f"Dynamically linked ({linkage}). "
-                    f"sonames: {', '.join(sonames)}. "
-                    f"dpkg: "
-                    f"{', '.join(dpkg_pkgs)}"
-                    f" ({comp.get('architecture', 'amd64')})"
-                ),
-            }
-
-            # PURL
-            if comp.get("purl"):
-                pkg["externalRefs"].append({
-                    "referenceCategory":
-                        "PACKAGE-MANAGER",
-                    "referenceType": "purl",
-                    "referenceLocator":
-                        comp["purl"],
-                })
-
-            # CPE
-            if comp.get("cpe23"):
-                pkg["externalRefs"].append({
-                    "referenceCategory":
-                        "SECURITY",
-                    "referenceType": "cpe23Type",
-                    "referenceLocator":
-                        comp["cpe23"],
-                })
-
-            # Add optional fields only when known
-            if comp.get("version"):
-                pkg["versionInfo"] = comp["version"]
-            supplier = comp.get("supplier", "")
-            if (
-                supplier
-                and supplier != "NOASSERTION"
-            ):
-                pkg["supplier"] = (
-                    f"Organization: {supplier}"
+            for comp in components:
+                safe_name = self._sanitize_spdx_id(
+                    comp["name"]
                 )
-            hp = comp.get("homepage", "")
-            if hp and hp != "NOASSERTION":
-                pkg["homepage"] = hp
+                pkg_id = self._next_spdx_id(safe_name)
 
-            doc["packages"].append(pkg)
+                linkage = (
+                    "direct" if comp.get("direct")
+                    else "transitive"
+                )
+                sonames = comp.get("sonames", [])
+                dpkg_pkgs = comp.get(
+                    "dpkg_packages", []
+                )
 
-            # DYNAMIC_LINK from root
-            doc["relationships"].append({
-                "spdxElementId": root_id,
-                "relationshipType":
-                    "DYNAMIC_LINK",
-                "relatedSpdxElement": pkg_id,
-            })
+                dl = (
+                    comp["homepage"]
+                    if comp.get("homepage")
+                    and comp["homepage"]
+                    != "NOASSERTION"
+                    else "NOASSERTION"
+                )
+                pkg = {
+                    "SPDXID": pkg_id,
+                    "name": comp["name"],
+                    "downloadLocation": dl,
+                    "filesAnalyzed": False,
+                    "primaryPackagePurpose":
+                        "LIBRARY",
+                    "externalRefs": [],
+                    "comment": (
+                        f"Dynamically linked "
+                        f"({linkage}). "
+                        f"sonames: "
+                        f"{', '.join(sonames)}. "
+                        f"dpkg: "
+                        f"{', '.join(dpkg_pkgs)}"
+                        f" ({comp.get('architecture', 'amd64')})"
+                    ),
+                }
+
+                # PURL
+                if comp.get("purl"):
+                    pkg["externalRefs"].append({
+                        "referenceCategory":
+                            "PACKAGE-MANAGER",
+                        "referenceType": "purl",
+                        "referenceLocator":
+                            comp["purl"],
+                    })
+
+                # CPE
+                if comp.get("cpe23"):
+                    pkg["externalRefs"].append({
+                        "referenceCategory":
+                            "SECURITY",
+                        "referenceType":
+                            "cpe23Type",
+                        "referenceLocator":
+                            comp["cpe23"],
+                    })
+
+                # Add optional fields only when known
+                if comp.get("version"):
+                    pkg["versionInfo"] = (
+                        comp["version"]
+                    )
+                supplier = comp.get("supplier", "")
+                if (
+                    supplier
+                    and supplier != "NOASSERTION"
+                ):
+                    pkg["supplier"] = (
+                        f"Organization: {supplier}"
+                    )
+                hp = comp.get("homepage", "")
+                if hp and hp != "NOASSERTION":
+                    pkg["homepage"] = hp
+
+                doc["packages"].append(pkg)
+
+                # DYNAMIC_LINK from root
+                doc["relationships"].append({
+                    "spdxElementId": root_id,
+                    "relationshipType":
+                        "DYNAMIC_LINK",
+                    "relatedSpdxElement": pkg_id,
+                })
 
         # --- GCC as build tool ---
         gcc_id = self._next_spdx_id("gcc")
@@ -1015,6 +1028,7 @@ class AdgSpdxGenerator:
         binary_name=None,
         dynlib_dir=None,
         direct_only=False,
+        static_only=False,
     ):
         """Generate SPDX for a single binary.
 
@@ -1029,6 +1043,8 @@ class AdgSpdxGenerator:
             direct_only: if True, include only direct
                 dependencies. Use when transitive deps
                 belong to a downstream binary's SBOM.
+            static_only: if True, omit dynamically
+                linked library packages.
 
         Returns the output path on success, None on
         failure.
@@ -1119,6 +1135,7 @@ class AdgSpdxGenerator:
             doc_mapping=doc_mapping,
             logfile_hashes=logfile_hashes,
             direct_only=direct_only,
+            static_only=static_only,
         )
 
         # Write output
@@ -1197,6 +1214,16 @@ def main():
             "downstream binary's SBOM."
         ),
     )
+    ap.add_argument(
+        "--static-only",
+        action="store_true",
+        default=False,
+        help=(
+            "Omit dynamically linked library "
+            "packages. Only include root binary, "
+            "vendored/static libs, and build tool."
+        ),
+    )
     args = ap.parse_args()
 
     gen = AdgSpdxGenerator(
@@ -1211,6 +1238,7 @@ def main():
         binary_name=args.binary_name,
         dynlib_dir=args.dynlib_dir,
         direct_only=args.direct_only,
+        static_only=args.static_only,
     )
     if result:
         print(f"Success: {result}")
