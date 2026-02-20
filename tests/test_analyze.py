@@ -1821,6 +1821,8 @@ def _mock_pipeline():
     cloner = MagicMock()
     builder = MagicMock()
     spdx_gen = MagicMock()
+    adg_spdx = MagicMock()
+    adg_spdx.generate.return_value = []
     spdx_validator = MagicMock()
     syft_gen = MagicMock()
     binary_collector = MagicMock()
@@ -1831,6 +1833,7 @@ def _mock_pipeline():
         cloner=cloner,
         builder=builder,
         spdx_gen=spdx_gen,
+        adg_spdx=adg_spdx,
         spdx_validator=spdx_validator,
         syft_gen=syft_gen,
         binary_collector=binary_collector,

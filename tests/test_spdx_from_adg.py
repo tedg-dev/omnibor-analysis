@@ -15,6 +15,7 @@ from spdx_from_adg import (
     AdgSpdxGenerator,
     ComponentResolver,
     SpdxEmitter,
+    VendoredVersionDetector,
 )
 
 
@@ -839,6 +840,167 @@ class TestSpdxEmitterVendored(unittest.TestCase):
             if r["relationshipType"] == "STATIC_LINK"
         ]
         self.assertEqual(len(static_rels), 0)
+
+
+class TestVendoredVersionDetector(unittest.TestCase):
+    """Tests for VendoredVersionDetector."""
+
+    def test_version_file(self):
+        """Detect version from VERSION file."""
+        with tempfile.TemporaryDirectory() as td:
+            lib_dir = Path(td) / "deps" / "jemalloc"
+            src_dir = lib_dir / "src"
+            src_dir.mkdir(parents=True)
+            (lib_dir / "VERSION").write_text(
+                "5.3.0-0-g0\n"
+            )
+            (src_dir / "arena.c").write_text("")
+            det = VendoredVersionDetector()
+            ver = det.detect("jemalloc", [
+                str(src_dir / "arena.c"),
+            ])
+            self.assertEqual(ver, "5.3.0")
+
+    def test_header_define_release(self):
+        """Detect version from #define LIB_RELEASE."""
+        with tempfile.TemporaryDirectory() as td:
+            h = Path(td) / "lua.h"
+            h.write_text(
+                '#define LUA_VERSION "Lua 5.1"\n'
+                '#define LUA_RELEASE "Lua 5.1.5"\n'
+                '#define LUA_VERSION_NUM 501\n'
+            )
+            det = VendoredVersionDetector()
+            ver = det.detect("lua", [str(h)])
+            self.assertEqual(ver, "5.1.5")
+
+    def test_header_define_major_minor_patch(self):
+        """Detect version from MAJOR/MINOR/PATCH."""
+        with tempfile.TemporaryDirectory() as td:
+            h = Path(td) / "hiredis.h"
+            h.write_text(
+                "#define HIREDIS_MAJOR 1\n"
+                "#define HIREDIS_MINOR 2\n"
+                "#define HIREDIS_PATCH 0\n"
+            )
+            det = VendoredVersionDetector()
+            ver = det.detect("hiredis", [str(h)])
+            self.assertEqual(ver, "1.2.0")
+
+    def test_header_define_version_major_minor(self):
+        """Detect X.Y when no PATCH define."""
+        with tempfile.TemporaryDirectory() as td:
+            h = Path(td) / "lib.h"
+            h.write_text(
+                "#define XXH_VERSION_MAJOR    0\n"
+                "#define XXH_VERSION_MINOR    8\n"
+                "#define XXH_VERSION_RELEASE  3\n"
+            )
+            det = VendoredVersionDetector()
+            # RELEASE != PATCH, so only MAJOR.MINOR
+            ver = det.detect("xxhash", [str(h)])
+            self.assertEqual(ver, "0.8")
+
+    def test_header_comment_version(self):
+        """Detect version from header comment."""
+        with tempfile.TemporaryDirectory() as td:
+            h = Path(td) / "linenoise.h"
+            h.write_text(
+                "/* linenoise.h -- VERSION 1.0\n"
+                " * A readline replacement.\n"
+                " */\n"
+            )
+            det = VendoredVersionDetector()
+            ver = det.detect("linenoise", [str(h)])
+            self.assertEqual(ver, "1.0")
+
+    def test_pc_in_file(self):
+        """Detect version from .pc.in file."""
+        with tempfile.TemporaryDirectory() as td:
+            pc = Path(td) / "hiredis.pc.in"
+            pc.write_text(
+                "prefix=@PREFIX@\n"
+                "Name: hiredis\n"
+                "Version: 1.2.0\n"
+            )
+            h = Path(td) / "hiredis.h"
+            h.write_text("/* no version */\n")
+            det = VendoredVersionDetector()
+            ver = det.detect("hiredis", [str(h)])
+            self.assertEqual(ver, "1.2.0")
+
+    def test_no_version_found(self):
+        """Return None when no version info exists."""
+        with tempfile.TemporaryDirectory() as td:
+            h = Path(td) / "fpconv_dtoa.h"
+            h.write_text("/* no version info */\n")
+            det = VendoredVersionDetector()
+            ver = det.detect("fpconv", [str(h)])
+            self.assertIsNone(ver)
+
+    def test_version_file_unreadable(self):
+        """Gracefully handle unreadable VERSION."""
+        det = VendoredVersionDetector()
+        result = det._parse_version_file(
+            Path("/nonexistent/VERSION")
+        )
+        self.assertIsNone(result)
+
+    def test_header_unreadable(self):
+        """Gracefully handle unreadable header."""
+        det = VendoredVersionDetector()
+        result = det._parse_header_defines(
+            "/nonexistent/lib.h", "lib"
+        )
+        self.assertIsNone(result)
+
+    def test_header_comment_unreadable(self):
+        """Gracefully handle unreadable header."""
+        det = VendoredVersionDetector()
+        result = det._parse_header_comment(
+            "/nonexistent/lib.h"
+        )
+        self.assertIsNone(result)
+
+    def test_pc_in_unreadable(self):
+        """Gracefully handle unreadable .pc.in."""
+        det = VendoredVersionDetector()
+        result = det._parse_pc_in(
+            Path("/nonexistent/lib.pc.in")
+        )
+        self.assertIsNone(result)
+
+    def test_emit_includes_detected_version(self):
+        """Vendored packages get versionInfo when found."""
+        with tempfile.TemporaryDirectory() as td:
+            # Create a vendored header with version
+            dep_dir = Path(td) / "deps" / "lua" / "src"
+            dep_dir.mkdir(parents=True)
+            (dep_dir / "lua.h").write_text(
+                '#define LUA_RELEASE "Lua 5.1.5"\n'
+            )
+            emitter = SpdxEmitter(
+                repo_name="redis",
+                repo_version="7.2.0",
+                distro="Ubuntu 22.04",
+                gcc_version="gcc 11.4.0",
+                binary_name="redis-server",
+            )
+            files = [
+                {"sha1": "a1", "file_path":
+                    str(dep_dir / "lua.h")},
+            ]
+            doc = emitter.emit(
+                components=[], project_files=files,
+                doc_mapping={}, logfile_hashes={},
+            )
+            lua_pkg = [
+                p for p in doc["packages"]
+                if p["name"] == "lua"
+            ][0]
+            self.assertEqual(
+                lua_pkg["versionInfo"], "5.1.5"
+            )
 
 
 class TestSpdxEmitterPerBinary(unittest.TestCase):
